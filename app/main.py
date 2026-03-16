@@ -4,10 +4,29 @@ from app.api.v1.datasets import router as datasets_router
 from app.api.v1.clasificador import router as clasificador_router
 from app.api.v1.homologador import router as homologador_router
 from app.core.config import CONFIG_SEDES, get_settings
+from app.services.inferencia_clasificador_service import _load_model, _load_maestro
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("--- Iniciando Lifespan (Warm-up) ---")
+    try:
+        print("Cargando modelo clasificador...")
+        _load_model()
+        
+        print("Cargando maestro de productos...")
+        _load_maestro()
+        
+        print("--- Warm-up completado con éxito ---")
+    except Exception as e:
+        print(f"--- Error durante el warm-up: {e} ---")
+    
+    yield
+    
+    print("--- Limpiando recursos antes de apagar ---")
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name)
-
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 @app.get("/health")
 def health() -> dict:

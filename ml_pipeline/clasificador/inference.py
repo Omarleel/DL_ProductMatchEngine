@@ -4,10 +4,6 @@ import numpy as np
 import pandas as pd
 
 from ml_pipeline.utils.preparacion import preparar_facturas
-
-from .factor_resolver import MaestroFactorResolver
-from .weight_resolver import MaestroWeightResolver
-from .brand_category_resolver import MaestroBrandCategoryResolver
 from .model import ModeloClasificadorProductos
 
 
@@ -70,12 +66,15 @@ def _build_inference_frame(productos_facturas: pd.DataFrame) -> pd.DataFrame:
 def inferir_atributos_producto(
     productos_facturas: pd.DataFrame,
     modelo: ModeloClasificadorProductos,
-    maestro: pd.DataFrame | None = None,
-    batch_size: int = 512,
+    resolvers: dict | None = None,
+    batch_size: int = 32,
     include_factor_debug: bool = False,
     resolver_marca_categoria_desde_maestro: bool = False,
     brand_category_min_score: float = 0.55,
 ) -> pd.DataFrame:
+    
+    # 1. Preparación de datos e Inferencia de Red Neuronal
+    # _build_inference_frame debe ser eficiente (operaciones vectorizadas)
     inf_df = _build_inference_frame(productos_facturas)
     pred_df = modelo.predict(inf_df, batch_size=batch_size)
 
@@ -85,23 +84,16 @@ def inferir_atributos_producto(
     salida["ProductoFactura"] = productos_facturas.get("Producto", "")
     salida["UnidadFactura"] = productos_facturas.get("UnidaMedidaCompra", "")
 
-    factor_df = None
-    weight_df = None
-    bc_df = None
-
-    if maestro is not None and len(productos_facturas) > 0:
-        factor_resolver = MaestroFactorResolver(maestro)
-        factor_df = factor_resolver.resolve_many(productos_facturas)
-
-        fv_res = pd.to_numeric(factor_df["resolved_factorVenta"], errors="coerce")
-        fc_res = pd.to_numeric(factor_df["resolved_factorConversion"], errors="coerce")
-
-        salida["pred_factorVenta"] = fv_res
-        salida["pred_factorConversion"] = fc_res
+    # 2. Uso de Resolvers pre-indexados (Evitamos el LAG de inicialización)
+    if resolvers and len(productos_facturas) > 0:
+        # Resolver Factores
+        factor_df = resolvers["factor"].resolve_many(productos_facturas)
+        salida["pred_factorVenta"] = pd.to_numeric(factor_df["resolved_factorVenta"], errors="coerce")
+        salida["pred_factorConversion"] = pd.to_numeric(factor_df["resolved_factorConversion"], errors="coerce")
         salida = _enforce_integer_factors(salida)
 
-        weight_resolver = MaestroWeightResolver(maestro)
-        weight_df = weight_resolver.resolve_many(
+        # Resolver Pesos
+        weight_df = resolvers["weight"].resolve_many(
             productos_facturas=productos_facturas,
             factor_venta=salida["pred_factorVenta"],
             factor_conversion=salida["pred_factorConversion"],
@@ -120,11 +112,7 @@ def inferir_atributos_producto(
 
         # NUEVO: resolver marca/categoría desde maestro
         if resolver_marca_categoria_desde_maestro:
-            bc_resolver = MaestroBrandCategoryResolver(
-                maestro=maestro,
-                min_score=brand_category_min_score,
-            )
-            bc_df = bc_resolver.resolve_many(productos_facturas)
+            bc_df = resolvers["brand_cat"].resolve_many(productos_facturas)
 
             marca_res = bc_df["resolved_marca"].astype(object)
             categoria_res = bc_df["resolved_categoria"].astype(object)
@@ -191,25 +179,25 @@ def inferir_atributos_producto(
     salida["pred_pesoUnitarioKg"] = pd.to_numeric(salida["pred_pesoUnitarioKg"], errors="coerce").fillna(0.0).round(6)
     salida["pred_pesoCajaKg"] = pd.to_numeric(salida["pred_pesoCajaKg"], errors="coerce").fillna(0.0).round(6)
 
-    if include_factor_debug and maestro is None:
-        salida["factor_source"] = "modelo_nn"
-        salida["factor_match_score"] = 0.0
-        salida["factor_match_cod"] = ""
-        salida["factor_match_producto"] = ""
-        salida["resolved_factorVenta"] = np.nan
-        salida["resolved_factorConversion"] = np.nan
-        salida["weight_source"] = "modelo_nn_peso"
-        salida["weight_match_score"] = 0.0
-        salida["weight_match_cod"] = ""
-        salida["weight_match_producto"] = ""
-        salida["resolved_pesoUnitarioKg"] = np.nan
-        salida["resolved_pesoCajaKg"] = np.nan
-        salida["brand_category_source"] = "modelo_nn"
-        salida["brand_category_match_score"] = 0.0
-        salida["brand_category_match_cod"] = ""
-        salida["brand_category_match_producto"] = ""
-        salida["resolved_marca"] = np.nan
-        salida["resolved_categoria"] = np.nan
+    if include_factor_debug:
+        # Usamos una lista para recolectar DataFrames y concatenar una sola vez (más rápido)
+        to_concat = []
+        for df_source in [factor_df, weight_df, bc_df]:
+            if df_source is not None:
+                # Solo traemos columnas que no existan ya en 'salida' para evitar duplicados (.1, .2)
+                cols_to_use = df_source.columns.difference(salida.columns)
+                to_concat.append(df_source[cols_to_use])
+        
+        if to_concat:
+            salida = pd.concat([salida, *to_concat], axis=1)
+
+    # 4. Manejo de casos donde no hay Maestro (Valores por defecto para debug)
+    if include_factor_debug and not resolvers:
+        # Aseguramos que las columnas existan aunque no haya maestro para evitar KeyErrors
+        debug_cols = ["factor_source", "weight_source", "brand_category_source"]
+        for col in debug_cols:
+            if col not in salida.columns:
+                salida[col] = "modelo_nn_default"
 
     columnas = [
         "RucProveedor",
