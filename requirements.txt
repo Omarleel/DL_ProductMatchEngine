@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+numpy<2
+pandas
+scikit-learn
+tensorflow-gpu==2.10.0
+matplotlib
+pyodbc
