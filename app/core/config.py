@@ -24,7 +24,7 @@ class SedeDBConfig(BaseModel):
 
 
 class Settings(BaseModel):
-    app_name: str = os.getenv("APP_NAME", "DL CSM API")
+    app_name: str = os.getenv("APP_NAME", "DL_ProductMatchEngine")
     app_env: str = os.getenv("APP_ENV", "dev")
     api_v1_prefix: str = "/api/v1"
 
