@@ -82,7 +82,7 @@ def inferir_atributos_producto(
     salida["RucProveedor"] = productos_facturas.get("RucProveedor", "")
     salida["CodProductoFactura"] = productos_facturas.get("CodProducto", "")
     salida["ProductoFactura"] = productos_facturas.get("Producto", "")
-    salida["UnidadFactura"] = productos_facturas.get("UnidaMedidaCompra", "")
+    salida["UnidadFactura"] = productos_facturas.get("UnidadMedidaCompra", "")
 
     # 2. Uso de Resolvers pre-indexados (Evitamos el LAG de inicialización)
     if resolvers and len(productos_facturas) > 0:

@@ -1,11 +1,24 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from typing import Optional
+
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    BackgroundTasks,
+    Request,
+    UploadFile,
+    File,
+    Form,
+)
 
 from app.schemas.homologador import (
     HomologacionRequest,
     HomologacionResponse,
     EntrenamientoHomologadorRequest,
 )
-from app.services.inferencia_homologacion_service import homologar_items
+from app.services.inferencia_homologacion_service import (
+    homologar_items,
+    cargar_items_desde_csv,
+)
 from app.services.entrenamiento_homologador_service import entrenar_modelo_homologador
 from ml_pipeline.utils.retraining import build_run_id
 
@@ -13,28 +26,84 @@ router = APIRouter(prefix="/homologador", tags=["homologador"])
 
 
 @router.post("/predecir", response_model=HomologacionResponse)
-def homologar(payload: HomologacionRequest) -> HomologacionResponse:
+async def homologar(
+    request: Request,
+    file: Optional[UploadFile] = File(default=None),
+    top_k: int = Form(default=2),
+    umbral_match: Optional[float] = Form(default=None),
+    top_n_candidates: int = Form(default=80),
+) -> HomologacionResponse:
     try:
-        items_dict = [item.model_dump() for item in payload.items]
+        content_type = request.headers.get("content-type", "")
 
-        resultados = homologar_items(
-            items=items_dict,
-            top_k=payload.top_k,
-            umbral_match=payload.umbral_match,
-            top_n_candidates=payload.top_n_candidates,
+        if "application/json" in content_type:
+            payload_raw = await request.json()
+            payload = HomologacionRequest.model_validate(payload_raw)
+
+            items_dict = [item.model_dump() for item in payload.items]
+
+            resultados, output_csv = homologar_items(
+                items=items_dict,
+                top_k=payload.top_k,
+                umbral_match=payload.umbral_match,
+                top_n_candidates=payload.top_n_candidates,
+            )
+
+            return HomologacionResponse(
+                total=len(resultados),
+                resultados=resultados,
+                output_csv=output_csv,
+            )
+
+        if "multipart/form-data" in content_type:
+            if file is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Debes enviar un archivo CSV en el campo 'file'.",
+                )
+
+            if not file.filename or not file.filename.lower().endswith(".csv"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="El archivo debe tener extensión .csv.",
+                )
+
+            file_bytes = await file.read()
+            items_dict = cargar_items_desde_csv(file_bytes)
+
+            resultados, output_csv = homologar_items(
+                items=items_dict,
+                top_k=top_k,
+                umbral_match=umbral_match,
+                top_n_candidates=top_n_candidates,
+            )
+
+            return HomologacionResponse(
+                total=len(resultados),
+                resultados=resultados,
+                output_csv=output_csv,
+            )
+
+        raise HTTPException(
+            status_code=415,
+            detail="Content-Type no soportado. Usa application/json o multipart/form-data.",
         )
-        return HomologacionResponse(total=len(resultados), resultados=resultados)
 
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error en homologación: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Error en homologación: {}".format(exc)) from exc
 
 
 @router.post("/entrenar")
-async def iniciar_entrenamiento(payload: EntrenamientoHomologadorRequest, background_tasks: BackgroundTasks) -> dict:
+async def iniciar_entrenamiento(
+    payload: EntrenamientoHomologadorRequest,
+    background_tasks: BackgroundTasks,
+) -> dict:
     try:
         run_id = build_run_id("api_homologador")
 
@@ -65,4 +134,7 @@ async def iniciar_entrenamiento(payload: EntrenamientoHomologadorRequest, backgr
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Error al iniciar entrenamiento del homologador: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail="Error al iniciar entrenamiento del homologador: {}".format(exc),
+        ) from exc

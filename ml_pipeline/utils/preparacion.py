@@ -17,7 +17,7 @@ EQUIVALENCIAS_MAESTRO = {
     "CodProducto2": ["codigo_producto2", "codigoproducto2", "codproducto2"],
     "CodProducto3": ["codigo_producto3", "codigoproducto3", "codproducto3"],
     "Producto": ["producto", "descripcion", "descripción"],
-    "UnidaMedidaCompra": ["unidadmedidacompra", "unidamedidacompra", "unidad_compra", "unidad"],
+    "UnidadMedidaCompra": ["unidadmedidacompra", "unidamedidacompra", "unidad_compra", "unidad"],
     "CostoCaja": ["costocaja", "costo_caja", "costo"],
 }
 
@@ -25,7 +25,7 @@ EQUIVALENCIAS_FACTURAS = {
     "RucProveedor": ["rucproveedor", "ruc_proveedor", "ruc"],
     "CodProducto": ["codigo_producto", "codigoproducto", "codigo", "codproducto"],
     "Producto": ["producto", "descripcion", "descripción"],
-    "UnidaMedidaCompra": [
+    "UnidadMedidaCompra": [
         "unidadmedidacompra",
         "unidamedidacompra",
         "unidad_compra",
@@ -105,7 +105,7 @@ def preparar_maestro(maestro: pd.DataFrame) -> pd.DataFrame:
 
     validar_columnas(
         df,
-        ["RucProveedor", "CodProducto", "Producto", "UnidaMedidaCompra"],
+        ["RucProveedor", "CodProducto", "Producto", "UnidadMedidaCompra"],
         "maestro",
     )
 
@@ -128,7 +128,7 @@ def preparar_maestro(maestro: pd.DataFrame) -> pd.DataFrame:
         df["PesoUnitario"] = 0.0
 
     df["PesoUnitario"] = pd.to_numeric(df["PesoUnitario"], errors="coerce").fillna(0.0)
-    df["Unidad_norm"] = df["UnidaMedidaCompra"].fillna("").astype(str).map(normalizar_unidad)
+    df["Unidad_norm"] = df["UnidadMedidaCompra"].fillna("").astype(str).map(normalizar_unidad)
     df["CostoCaja"] = pd.to_numeric(df["CostoCaja"], errors="coerce").fillna(0.0)
     df["Costo_log"] = df["CostoCaja"].map(log_seguro)
 
@@ -147,7 +147,7 @@ def preparar_facturas(facturas: pd.DataFrame) -> pd.DataFrame:
 
     validar_columnas(
         df,
-        ["RucProveedor", "CodProducto", "Producto", "UnidaMedidaCompra"],
+        ["RucProveedor", "CodProducto", "Producto", "UnidadMedidaCompra"],
         "facturas",
     )
 
@@ -165,7 +165,7 @@ def preparar_facturas(facturas: pd.DataFrame) -> pd.DataFrame:
         .map(normalizar_codigo)
     )
 
-    df["Unidad_norm"] = df["UnidaMedidaCompra"].fillna("").astype(str).map(normalizar_unidad)
+    df["Unidad_norm"] = df["UnidadMedidaCompra"].fillna("").astype(str).map(normalizar_unidad)
     df["CostoCaja"] = pd.to_numeric(df["CostoCaja"], errors="coerce").fillna(0.0)
     df["Costo_log"] = df["CostoCaja"].map(log_seguro)
     df["PesoUnitario"] = pd.to_numeric(df["PesoUnitario"], errors="coerce").fillna(0.0)

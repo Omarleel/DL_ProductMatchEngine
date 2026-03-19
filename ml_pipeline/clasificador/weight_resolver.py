@@ -463,7 +463,7 @@ class MaestroWeightResolver:
 
     def resolve_one(self, factura_preparada: pd.Series, factor_venta: int, factor_conversion: int) -> WeightResolution:
         text = str(factura_preparada.get("Producto", ""))
-        unit = str(factura_preparada.get("UnidaMedidaCompra", ""))
+        unit = str(factura_preparada.get("UnidadMedidaCompra", ""))
 
         if _is_non_physical(text, unit):
             return WeightResolution(0.0, 0.0, "regla_no_fisico", 1.0)

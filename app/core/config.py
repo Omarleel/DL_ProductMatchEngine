@@ -34,6 +34,7 @@ class Settings(BaseModel):
     data_dir: Path = BASE_DIR / "data"
     raw_data_dir: Path = data_dir / "raw"
     processed_data_dir: Path = data_dir / "processed"
+    results_data_dir: Path = data_dir / "results"
     artifacts_dir: Path = BASE_DIR / "artifacts"
 
 

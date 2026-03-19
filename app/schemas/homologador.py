@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-
 from pydantic import BaseModel, Field
 
 
@@ -9,7 +8,7 @@ class HomologacionItemRequest(BaseModel):
     RucProveedor: Optional[str] = None
     CodProducto: Optional[str] = None
     Producto: Optional[str] = None
-    UnidaMedidaCompra: Optional[str] = None
+    UnidadMedidaCompra: Optional[str] = None
     CostoCaja: Optional[float] = 0.0
 
 
@@ -23,6 +22,7 @@ class HomologacionRequest(BaseModel):
 class HomologacionResponse(BaseModel):
     total: int
     resultados: List[Dict[str, Any]]
+    output_csv: Optional[str] = None
 
 
 class EntrenamientoHomologadorRequest(BaseModel):
@@ -35,4 +35,4 @@ class EntrenamientoHomologadorRequest(BaseModel):
     k_hard_per_positive: int = Field(default=2, ge=1, le=10)
     min_model_score: float = Field(default=0.25, ge=0.0, le=1.0)
     min_support: float = Field(default=0.08, ge=0.0, le=1.0)
-    force_replace: bool = False
+    force_replace: bool = Field(default=False)

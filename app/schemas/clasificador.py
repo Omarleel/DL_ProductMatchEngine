@@ -9,7 +9,7 @@ class PrediccionItemRequest(BaseModel):
     RucProveedor: Optional[str] = None
     CodProducto: Optional[str] = None
     Producto: Optional[str] = None
-    UnidaMedidaCompra: Optional[str] = None
+    UnidadMedidaCompra: Optional[str] = None
     CostoCaja: Optional[float] = 0.0
 
 

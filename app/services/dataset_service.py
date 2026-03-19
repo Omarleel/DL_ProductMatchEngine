@@ -74,7 +74,7 @@ SELECT
     RTRIM(a.carticulos_codigo_equipo) AS CodProducto2,
     RTRIM(a.carticulos_nro_parte) AS CodProducto3,
     RTRIM(a.carticulos_nombre) AS Producto,
-    RTRIM(um.cunidad_de_medida_nombre) AS UnidaMedidaCompra,
+    RTRIM(um.cunidad_de_medida_nombre) AS UnidadMedidaCompra,
     a.nfactor_a_venta AS FactorVenta,
     a.narticulos_factor_conversion AS FactorConversion,
     ROUND(a.narticulos_peso / a.narticulos_factor_conversion, 2) AS PesoUnitario,
@@ -93,14 +93,14 @@ ORDER BY RucProveedor ASC;
 SQL_FACTURAS_NUEVAS_REX = """
 WITH UltimoCosto AS (
     SELECT c.EmisorRuc, COALESCE(ci.CodProducto, ci.CodProdGS1) AS CodProducto,
-           ci.Descripcion AS Producto, ci.DesUnidadMedida AS UnidaMedidaCompra,
+           ci.Descripcion AS Producto, ci.DesUnidadMedida AS UnidadMedidaCompra,
            ci.MtoPrecioUnitario AS CostoCaja,
            ROW_NUMBER() OVER (PARTITION BY COALESCE(ci.CodProducto, ci.CodProdGS1) ORDER BY c.FechaEmision DESC, c.CarSunat DESC) AS rn
     FROM Cpe c INNER JOIN CpeItems ci ON ci.CarSunat = c.CarSunat
     WHERE c.TipoDoc = '01' AND LEN(COALESCE(ci.CodProducto, ci.CodProdGS1)) > 2
       AND c.EmisorRuc IN (SELECT cproveedor_ruc FROM _proveedor)
 )
-SELECT EmisorRuc AS RucProveedor, CodProducto, Producto, UnidaMedidaCompra, CostoCaja FROM UltimoCosto WHERE rn = 1;
+SELECT EmisorRuc AS RucProveedor, CodProducto, Producto, UnidadMedidaCompra, CostoCaja FROM UltimoCosto WHERE rn = 1;
 """
 
 
@@ -146,7 +146,7 @@ WITH UltimoCosto AS (
         c.EmisorRuc, 
         COALESCE(ci.CodProducto, ci.CodProdGS1) AS CodProducto, 
         ci.Descripcion AS Producto, 
-        ci.DesUnidadMedida AS UnidaMedidaCompra,
+        ci.DesUnidadMedida AS UnidadMedidaCompra,
         ci.MtoPrecioUnitario AS CostoCaja,
         ROW_NUMBER() OVER (
             PARTITION BY COALESCE(ci.CodProducto, ci.CodProdGS1) 
@@ -161,7 +161,7 @@ SELECT
     EmisorRuc AS RucProveedor, 
     CodProducto, 
     Producto, 
-    UnidaMedidaCompra, 
+    UnidadMedidaCompra, 
     CostoCaja
 FROM UltimoCosto
 WHERE rn = 1
