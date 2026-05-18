@@ -11,6 +11,7 @@ class HomologacionItemRequest(BaseModel):
     RucProveedor: Optional[str] = None
     CodProducto: Optional[str] = None
     Producto: Optional[str] = None
+    CodUnidadMedidaCompra: Optional[str] = None
     UnidadMedidaCompra: Optional[str] = None
     CostoCaja: Optional[float] = 0.0
     ValorTotal: Optional[float] = 0.0

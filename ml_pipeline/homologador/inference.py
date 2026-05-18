@@ -113,7 +113,10 @@ def _buscar_conversion_cantidad(
     ruc = _norm_ruc_alias(fila_factura.get("RucProveedor", ""))
     cod_cpe = _norm_cod_alias(fila_factura.get("CodProducto", ""))
     cod_master = _norm_cod_alias(candidato.get("CodProducto", ""))
-    unidad_cpe = _norm_unit_alias(fila_factura.get("UnidadMedidaCompra", ""))
+    unidad_cpe = unidad_cpe = _norm_unit_alias(
+        fila_factura.get("CodUnidadMedidaCompra", "")
+        or fila_factura.get("UnidadMedidaCompra", "")
+    )
     unidad_compra = _norm_unit_alias(candidato.get("UnidadMedidaCompra", ""))
 
     if not cod_cpe or not cod_master:
@@ -213,7 +216,10 @@ def _build_factura_output_fields(
     conversion_nivel = ""
     conversion_muestras = 0.0
     conversion_confianza = 0.0
-    unidad_cpe_usada = _norm_unit_alias(f.get("UnidadMedidaCompra", ""))
+    unidad_cpe_usada = _norm_unit_alias(
+        f.get("CodUnidadMedidaCompra", "")
+        or f.get("UnidadMedidaCompra", "")
+    )
     unidad_compra_usada = _norm_unit_alias(candidato.get("UnidadMedidaCompra", ""))
 
     cantidad_compra = 0.0
