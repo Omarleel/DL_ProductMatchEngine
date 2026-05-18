@@ -6,6 +6,13 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+    from rapidfuzz import process as _rf_process
+except Exception:  # pragma: no cover - fallback si rapidfuzz no está instalado
+    _rf_fuzz = None
+    _rf_process = None
+
 from ml_pipeline.utils.limpieza import (
     DIMENSION_TOKENS,
     MEASURE_TOKENS,
@@ -17,6 +24,9 @@ from ml_pipeline.utils.preparacion import preparar_facturas, preparar_maestro
 
 from .factor_resolver import (
     _anchor_tokens,
+    _candidate_tokens,
+    _code_variants,
+    _ensure_prepared_facturas,
     _jaccard,
     _norm_code_robust,
     _norm_ruc,
@@ -284,23 +294,96 @@ class MaestroWeightResolver:
         for i, row in self.master.iterrows():
             ruc = str(row["_ruc_key"])
             for col in ["CodProducto", "CodProducto2", "CodProducto3"]:
-                code = _norm_code_robust(row.get(col, ""))
-                if code:
+                for code in _code_variants(row.get(col, "")):
                     self.exact_index[(ruc, code)] = int(i)
 
+        self.max_fuzzy_candidates = 128
+        self._build_search_indexes()
+
+    def _build_search_indexes(self) -> None:
+        n = len(self.master)
+        self._all_indices = tuple(range(n))
+        self._producto_norm_values = self.master["_producto_norm"].fillna("").astype(str).tolist()
+        self._global_choices = {i: self._producto_norm_values[i] for i in self._all_indices}
+
+        self._ruc_groups: dict[str, tuple[int, ...]] = {}
+        self._ruc_sets: dict[str, set[int]] = {}
+        self._ruc_choices: dict[str, dict[int, str]] = {}
+        for ruc, idx in self.master.groupby("_ruc_key", sort=False).groups.items():
+            ids = tuple(int(i) for i in idx)
+            ruc_key = str(ruc)
+            self._ruc_groups[ruc_key] = ids
+            self._ruc_sets[ruc_key] = set(ids)
+            self._ruc_choices[ruc_key] = {i: self._producto_norm_values[i] for i in ids}
+
+        self._token_index: dict[str, list[int]] = {}
+        for i, row in self.master.iterrows():
+            tokens = set(_candidate_tokens(row.get("_base_norm", ""), n=10)) | set(
+                _candidate_tokens(row.get("_producto_norm", ""), n=10)
+            ) | set(row.get("_family_tokens", ()))
+            for tok in tokens:
+                self._token_index.setdefault(str(tok), []).append(int(i))
+
+        self._candidate_cache: dict[tuple[str, str, str], tuple[tuple[int, ...], str]] = {}
+
     def _exact_match(self, row: pd.Series) -> pd.Series | None:
-        key = (_norm_ruc(row.get("RucProveedor", "")), _norm_code_robust(row.get("CodProducto", "")))
-        idx = self.exact_index.get(key)
-        if idx is None:
-            return None
-        return self.master.iloc[int(idx)]
+        ruc = _norm_ruc(row.get("RucProveedor", ""))
+        for code in _code_variants(row.get("CodProducto", "")):
+            idx = self.exact_index.get((ruc, code))
+            if idx is not None:
+                return self.master.iloc[int(idx)]
+        return None
 
     def _candidate_pool(self, row: pd.Series) -> tuple[pd.DataFrame, str]:
         ruc = _norm_ruc(row.get("RucProveedor", ""))
-        local = self.master[self.master["_ruc_key"] == ruc]
-        if not local.empty:
-            return local, "same_ruc"
-        return self.master, "global"
+        fact_norm = str(row.get("Producto_norm", row.get("Producto", "")))
+        fact_base = str(row.get("Producto_base_norm", row.get("Producto", "")))
+
+        if ruc in self._ruc_choices:
+            scope = "same_ruc"
+            choices = self._ruc_choices[ruc]
+            allowed = self._ruc_sets[ruc]
+            scope_key = ruc
+        else:
+            scope = "global"
+            choices = self._global_choices
+            allowed = None
+            scope_key = "*"
+
+        cache_key = (scope_key, fact_norm, fact_base)
+        cached = self._candidate_cache.get(cache_key)
+        if cached is not None:
+            ids, cached_scope = cached
+            return self.master.iloc[list(ids)], cached_scope
+
+        tokens = set(_candidate_tokens(fact_base, n=8)) | set(_candidate_tokens(fact_norm, n=8)) | set(_family_tokens(fact_norm))
+        token_ids: set[int] = set()
+        for tok in tokens:
+            token_ids.update(self._token_index.get(str(tok), ()))
+
+        if allowed is not None and token_ids:
+            token_ids.intersection_update(allowed)
+
+        search_choices = choices
+        if token_ids:
+            search_choices = {i: self._producto_norm_values[i] for i in token_ids}
+
+        if _rf_process is not None and _rf_fuzz is not None and len(search_choices) > self.max_fuzzy_candidates:
+            matches = _rf_process.extract(
+                normalizar_texto(fact_norm),
+                search_choices,
+                scorer=_rf_fuzz.WRatio,
+                limit=self.max_fuzzy_candidates,
+            )
+            ids = tuple(int(match[2]) for match in matches)
+        else:
+            ids = tuple(int(i) for i in list(search_choices.keys())[: self.max_fuzzy_candidates])
+
+        if not ids:
+            ids = tuple(int(i) for i in list(choices.keys())[: self.max_fuzzy_candidates])
+
+        self._candidate_cache[cache_key] = (ids, scope)
+        return self.master.iloc[list(ids)], scope
 
     def _score_candidates(
         self,
@@ -528,7 +611,7 @@ class MaestroWeightResolver:
         return WeightResolution(None, None, "modelo_nn_peso", 0.0)
 
     def resolve_many(self, productos_facturas: pd.DataFrame, factor_venta: pd.Series, factor_conversion: pd.Series) -> pd.DataFrame:
-        fact_p = preparar_facturas(productos_facturas)
+        fact_p = _ensure_prepared_facturas(productos_facturas)
         fv = pd.to_numeric(pd.Series(factor_venta).reset_index(drop=True), errors="coerce").fillna(1).astype(int)
         fc = pd.to_numeric(pd.Series(factor_conversion).reset_index(drop=True), errors="coerce").fillna(fv).astype(int)
 

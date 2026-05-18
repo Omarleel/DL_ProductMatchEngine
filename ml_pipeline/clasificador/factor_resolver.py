@@ -9,6 +9,13 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+    from rapidfuzz import process as _rf_process
+except Exception:  # pragma: no cover - fallback si rapidfuzz no está instalado
+    _rf_fuzz = None
+    _rf_process = None
+
 from ml_pipeline.utils.limpieza import (
     DIMENSION_TOKENS,
     MEASURE_TOKENS,
@@ -112,7 +119,19 @@ def _jaccard(a: str, b: str) -> float:
 
 
 def _seq_ratio(a: str, b: str) -> float:
-    return SequenceMatcher(None, normalizar_texto(a), normalizar_texto(b)).ratio()
+    """Similaridad textual rápida.
+
+    RapidFuzz está en requirements y evita el cuello de botella de
+    difflib.SequenceMatcher en scoring masivo. Se deja fallback para entornos
+    donde no esté disponible.
+    """
+    a_norm = normalizar_texto(a)
+    b_norm = normalizar_texto(b)
+    if not a_norm or not b_norm:
+        return 0.0
+    if _rf_fuzz is not None:
+        return float(_rf_fuzz.ratio(a_norm, b_norm)) / 100.0
+    return SequenceMatcher(None, a_norm, b_norm).ratio()
 
 
 _STOP_TOKENS = {
@@ -135,8 +154,46 @@ _STOP_TOKENS = {
 }
 
 
-def _anchor_tokens(text: str, n: int = 3) -> tuple[str, ...]:
+def _code_variants(code) -> tuple[str, ...]:
+    """Variantes de código para que el match exacto no caiga al fuzzy.
+
+    En la API se eliminan ceros a la izquierda antes de resolver; el maestro
+    puede venir con/sin esos ceros. Indexamos ambas formas.
+    """
+    norm = _norm_code_robust(code)
+    if not norm:
+        return tuple()
+    variants = [norm]
+    stripped = norm.lstrip("0")
+    if stripped and stripped != norm:
+        variants.append(stripped)
+    return tuple(dict.fromkeys(variants))
+
+
+def _candidate_tokens(text: str, n: int = 8) -> tuple[str, ...]:
     toks = [t for t in _split_tokens(text) if not _is_number(t) and t not in _STOP_TOKENS and len(t) > 1]
+    return tuple(dict.fromkeys(toks[:n]))
+
+
+_PREPARED_FACTURA_COLUMNS = frozenset({
+    "Producto_norm",
+    "Producto_base_norm",
+    "Unidad_norm",
+    "TipoContenido",
+    "ContenidoUnidad",
+    "ContenidoTotal",
+    "FactorConversion",
+})
+
+
+def _ensure_prepared_facturas(productos_facturas: pd.DataFrame) -> pd.DataFrame:
+    if _PREPARED_FACTURA_COLUMNS.issubset(productos_facturas.columns):
+        return productos_facturas.reset_index(drop=True)
+    return preparar_facturas(productos_facturas)
+
+
+def _anchor_tokens(text: str, n: int = 3) -> tuple[str, ...]:
+    toks = _candidate_tokens(text, n=n)
     return tuple(toks[:n])
 
 
@@ -515,16 +572,88 @@ class MaestroFactorResolver:
             ruc = str(row["_ruc_key"])
             for col in ["CodProducto", "CodProducto2", "CodProducto3"]:
                 if col in row.index:
-                    code = _norm_code_robust(row.get(col, ""))
-                    if code:
+                    for code in _code_variants(row.get(col, "")):
                         self.exact_index[(ruc, code)] = int(i)
+
+        self.max_fuzzy_candidates = 128
+        self._build_search_indexes()
+
+    def _build_search_indexes(self) -> None:
+        n = len(self.master)
+        self._all_indices = tuple(range(n))
+        self._producto_norm_values = self.master["_producto_norm"].fillna("").astype(str).tolist()
+        self._global_choices = {i: self._producto_norm_values[i] for i in self._all_indices}
+
+        self._ruc_groups: dict[str, tuple[int, ...]] = {}
+        self._ruc_sets: dict[str, set[int]] = {}
+        self._ruc_choices: dict[str, dict[int, str]] = {}
+        for ruc, idx in self.master.groupby("_ruc_key", sort=False).groups.items():
+            ids = tuple(int(i) for i in idx)
+            ruc_key = str(ruc)
+            self._ruc_groups[ruc_key] = ids
+            self._ruc_sets[ruc_key] = set(ids)
+            self._ruc_choices[ruc_key] = {i: self._producto_norm_values[i] for i in ids}
+
+        self._token_index: dict[str, list[int]] = {}
+        for i, row in self.master.iterrows():
+            tokens = set(_candidate_tokens(row.get("_base_norm", ""), n=10)) | set(
+                _candidate_tokens(row.get("_producto_norm", ""), n=10)
+            )
+            for tok in tokens:
+                self._token_index.setdefault(tok, []).append(int(i))
+
+        self._candidate_cache: dict[tuple[str, str, str], tuple[tuple[int, ...], str]] = {}
 
     def _candidate_pool(self, row: pd.Series) -> tuple[pd.DataFrame, str]:
         ruc = _norm_ruc(row.get("RucProveedor", ""))
-        local = self.master[self.master["_ruc_key"] == ruc]
-        if not local.empty:
-            return local, "same_ruc"
-        return self.master, "global"
+        fact_norm = str(row.get("Producto_norm", row.get("Producto", "")))
+        fact_base = str(row.get("Producto_base_norm", row.get("Producto", "")))
+
+        if ruc in self._ruc_choices:
+            scope = "same_ruc"
+            choices = self._ruc_choices[ruc]
+            allowed = self._ruc_sets[ruc]
+            scope_key = ruc
+        else:
+            scope = "global"
+            choices = self._global_choices
+            allowed = None
+            scope_key = "*"
+
+        cache_key = (scope_key, fact_norm, fact_base)
+        cached = self._candidate_cache.get(cache_key)
+        if cached is not None:
+            ids, cached_scope = cached
+            return self.master.iloc[list(ids)], cached_scope
+
+        tokens = set(_candidate_tokens(fact_base, n=8)) | set(_candidate_tokens(fact_norm, n=8))
+        token_ids: set[int] = set()
+        for tok in tokens:
+            token_ids.update(self._token_index.get(tok, ()))
+
+        if allowed is not None and token_ids:
+            token_ids.intersection_update(allowed)
+
+        search_choices = choices
+        if token_ids:
+            search_choices = {i: self._producto_norm_values[i] for i in token_ids}
+
+        if _rf_process is not None and _rf_fuzz is not None and len(search_choices) > self.max_fuzzy_candidates:
+            matches = _rf_process.extract(
+                normalizar_texto(fact_norm),
+                search_choices,
+                scorer=_rf_fuzz.WRatio,
+                limit=self.max_fuzzy_candidates,
+            )
+            ids = tuple(int(match[2]) for match in matches)
+        else:
+            ids = tuple(int(i) for i in list(search_choices.keys())[: self.max_fuzzy_candidates])
+
+        if not ids:
+            ids = tuple(int(i) for i in list(choices.keys())[: self.max_fuzzy_candidates])
+
+        self._candidate_cache[cache_key] = (ids, scope)
+        return self.master.iloc[list(ids)], scope
 
     def _score_candidates(self, row: pd.Series, pool: pd.DataFrame, parsed: ParsedPackSignals) -> pd.DataFrame:
         if pool.empty:
@@ -581,11 +710,12 @@ class MaestroFactorResolver:
         return cand.sort_values(["score_factor_match", "sim_text_ratio", "sim_base_jaccard"], ascending=False)
 
     def _exact_match(self, row: pd.Series) -> Optional[pd.Series]:
-        key = (_norm_ruc(row.get("RucProveedor", "")), _norm_code_robust(row.get("CodProducto", "")))
-        idx = self.exact_index.get(key)
-        if idx is None:
-            return None
-        return self.master.iloc[int(idx)]
+        ruc = _norm_ruc(row.get("RucProveedor", ""))
+        for code in _code_variants(row.get("CodProducto", "")):
+            idx = self.exact_index.get((ruc, code))
+            if idx is not None:
+                return self.master.iloc[int(idx)]
+        return None
 
     def _resolution_from_row(
         self,
@@ -672,7 +802,7 @@ class MaestroFactorResolver:
         return FactorResolution(None, None, "modelo_nn", 0.0)
 
     def resolve_many(self, productos_facturas: pd.DataFrame) -> pd.DataFrame:
-        fact_p = preparar_facturas(productos_facturas)
+        fact_p = _ensure_prepared_facturas(productos_facturas)
         rows = []
         for row in fact_p.itertuples(index=False):
             r = self.resolve_one(pd.Series(row._asdict()))

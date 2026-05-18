@@ -93,7 +93,10 @@ def inferir_atributos_producto(
         df_para_resolvers["CodProducto"] = df_para_resolvers["CodProducto"].astype(str).str.lstrip('0')
 
     if resolvers and len(df_para_resolvers) > 0:
-        
+        # Preparar una sola vez y reutilizar el frame en factor/weight/brand.
+        # Antes, factor y weight ejecutaban preparar_facturas por separado.
+        df_para_resolvers = preparar_facturas(df_para_resolvers)
+
         factor_df = resolvers["factor"].resolve_many(df_para_resolvers)
         salida["pred_factorVenta"] = pd.to_numeric(factor_df["resolved_factorVenta"], errors="coerce")
         salida["pred_factorConversion"] = pd.to_numeric(factor_df["resolved_factorConversion"], errors="coerce")
