@@ -339,14 +339,25 @@ def normalizar_codigo(codigo: str) -> str:
 def normalizar_unidad(u: str) -> str:
     u = normalizar_texto(u)
     mapa = {
-        "UNIDAD PIEZA": "UNIDAD",
-        "UNIDAD PIEZAS": "UNIDAD",
+        "NIU": "UNIDAD",
         "UND": "UNIDAD",
+        "UNIDAD": "UNIDAD",
         "PIEZA": "UNIDAD",
-        "UND PIEZA": "UNIDAD",
+        "KGM": "KG",
+        "KG": "KG",
+        "GRM": "G",
+        "G": "G",
+        "LTR": "LT",
+        "L": "LT",
+        "LT": "LT",
+        "MLT": "ML",
+        "ML": "ML",
+        "BX": "CAJA",
         "CJ": "CAJA",
         "CAJ": "CAJA",
         "CJA": "CAJA",
+        "CAJA": "CAJA",
+        "PF": "PALETAS",
     }
     return mapa.get(u, u)
 

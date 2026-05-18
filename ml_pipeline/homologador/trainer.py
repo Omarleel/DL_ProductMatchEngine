@@ -21,6 +21,22 @@ from .model import ModeloHomologadorProductos
 logger = TrainingLogger("homologador")
 
 
+def _guardar_aliases_positivos_homologador(pares: pd.DataFrame, processed_data_dir: Path) -> Path | None:
+    """Guarda un CSV compacto solo con pares positivos para inferencia rápida."""
+    required = {"RucProveedor", "fact_cod", "master_cod", "label"}
+    if pares.empty or not required.issubset(set(pares.columns)):
+        return None
+
+    label_num = pd.to_numeric(pares["label"], errors="coerce").fillna(0).astype(int)
+    positivos = pares.loc[label_num == 1, ["RucProveedor", "fact_cod", "master_cod"]].drop_duplicates()
+    if positivos.empty:
+        return None
+
+    path = processed_data_dir / "aliases_positivos_homologador.csv"
+    positivos.to_csv(path, sep=";", index=False, encoding="utf-8-sig")
+    return path
+
+
 HOMOLOGADOR_METRIC_SPECS: list[MetricSpec] = [
     MetricSpec("ranking_metrics_valid.hit_at_1", "max", "hit_at_1", min_delta=1e-4),
     MetricSpec("pair_metrics_valid.pr_auc", "max", "pr_auc", min_delta=1e-4),
@@ -69,7 +85,10 @@ def entrenar_y_promover_homologador(
         processed_data_dir.mkdir(parents=True, exist_ok=True)
         pares_base_path = processed_data_dir / "pares_entrenamiento_homologador.csv"
         pares_base.to_csv(pares_base_path, sep=";", index=False, encoding="utf-8-sig")
+        aliases_path = _guardar_aliases_positivos_homologador(pares_base, processed_data_dir)
         logger.info("Pares base generados: rows=%s path=%s", len(pares_base), pares_base_path)
+        if aliases_path is not None:
+            logger.info("Aliases positivos compactos guardados: path=%s", aliases_path)
 
         split_helper = ModeloHomologadorProductos()
         train_base, valid_base = split_helper.split_train_valid(

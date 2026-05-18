@@ -74,12 +74,20 @@ def _load_homologador_model(tenant: str = DEFAULT_TENANT) -> ModeloHomologadorPr
 
 @lru_cache(maxsize=64)
 def _load_homologador_context(tenant: str = DEFAULT_TENANT) -> tuple[pd.DataFrame, dict, np.ndarray]:
-    """Prepara y cachea maestro + índice + embeddings por tenant para inferencia."""
+    """Prepara y cachea maestro + índice + embeddings por tenant para inferencia.
+
+    También deja columnas internas precomputadas para no copiar el maestro ni
+    recalcular máscaras por RUC en cada request.
+    """
     tenant_norm = normalizar_tenant(tenant)
     modelo = _load_homologador_model(tenant_norm)
     maestro_p = preparar_maestro(_load_maestro(tenant_norm)).copy()
+    maestro_p["_row_idx"] = np.arange(len(maestro_p), dtype=np.int32)
+    maestro_p["_ruc_norm"] = maestro_p["RucProveedor"].map(_norm_ruc_alias)
     idx = construir_indice_codigos(maestro_p)
-    maestro_emb = modelo.encode_prepared_items(maestro_p)
+    maestro_emb = modelo.encode_prepared_items(
+        maestro_p.drop(columns=["_row_idx", "_ruc_norm"], errors="ignore")
+    )
     return maestro_p, idx, maestro_emb
 
 
@@ -115,11 +123,11 @@ def _norm_cod_alias(value) -> str:
 def _load_positive_aliases(tenant: str = DEFAULT_TENANT) -> tuple[tuple[str, str, str], ...]:
     """
     Carga equivalencias positivas generadas durante el entrenamiento.
-    (Versión Optimizada)
     """
     tenant_norm = normalizar_tenant(tenant)
     processed_dir = get_tenant_processed_data_dir(tenant_norm)
     candidate_paths = [
+        processed_dir / "aliases_positivos_homologador.csv",
         processed_dir / "pares_entrenamiento_homologador.csv",
         processed_dir / "pares_entrenamiento_homologador_final.csv",
     ]
@@ -129,35 +137,41 @@ def _load_positive_aliases(tenant: str = DEFAULT_TENANT) -> tuple[tuple[str, str
         return tuple()
 
     try:
+        header = pd.read_csv(path, encoding="utf-8-sig", sep=";", nrows=0)
+        has_label = "label" in set(header.columns)
+        usecols = ["RucProveedor", "fact_cod", "master_cod"] + (["label"] if has_label else [])
         pares = pd.read_csv(
             path,
             encoding="utf-8-sig",
-            usecols=["RucProveedor", "fact_cod", "master_cod", "label"],
+            sep=";",
+            usecols=usecols,
             dtype={
                 "RucProveedor": "string",
                 "fact_cod": "string",
                 "master_cod": "string",
             },
-            sep=";",
-            low_memory=False
+            low_memory=False,
         )
     except Exception:
         return tuple()
 
-    required = {"RucProveedor", "fact_cod", "master_cod", "label"}
+    required = {"RucProveedor", "fact_cod", "master_cod"}
     if not required.issubset(set(pares.columns)):
         return tuple()
 
-    label_num = pd.to_numeric(pares["label"], errors="coerce").fillna(0).astype(int)
-    pos = pares.loc[label_num == 1, ["RucProveedor", "fact_cod", "master_cod"]].copy()
-    
+    if "label" in pares.columns:
+        label_num = pd.to_numeric(pares["label"], errors="coerce").fillna(0).astype(int)
+        pos = pares.loc[label_num == 1, ["RucProveedor", "fact_cod", "master_cod"]].copy()
+    else:
+        pos = pares[["RucProveedor", "fact_cod", "master_cod"]].copy()
+
     if pos.empty:
         return tuple()
 
     pos["_ruc"] = pos["RucProveedor"].map(_norm_ruc_alias)
     pos["_fact"] = pos["fact_cod"].map(_norm_cod_alias)
     pos["_master"] = pos["master_cod"].map(_norm_cod_alias)
-    
+
     pos = pos[(pos["_fact"] != "") & (pos["_master"] != "")].drop_duplicates(
         subset=["_ruc", "_fact", "_master"]
     )
@@ -315,36 +329,63 @@ def _build_learned_alias_index(
     maestro_p: pd.DataFrame,
     aliases: tuple[tuple[str, str, str], ...],
 ) -> dict[tuple[str, str], int]:
+    """Construye el índice (RUC, código factura) -> índice maestro.
+
+    La versión anterior recorría el maestro con iterrows en cada request. Esta
+    versión es vectorizada y se invoca desde un loader cacheado por tenant.
+    """
     if not aliases:
         return {}
 
-    maestro = maestro_p.copy()
-    maestro["_ruc_alias"] = maestro["RucProveedor"].map(_norm_ruc_alias)
-    maestro["_cod_alias"] = maestro["CodProducto"].map(_norm_cod_alias)
+    aliases_df = pd.DataFrame(aliases, columns=["ruc", "fact_cod", "master_cod"])
+    if aliases_df.empty:
+        return {}
 
-    by_ruc_cod = {
-        (str(row["_ruc_alias"]), str(row["_cod_alias"])): idx
-        for idx, row in maestro.iterrows()
-        if str(row["_cod_alias"])
-    }
+    maestro_keys = pd.DataFrame(
+        {
+            "idx": maestro_p.index,
+            "ruc": maestro_p["RucProveedor"].map(_norm_ruc_alias),
+            "master_cod": maestro_p["CodProducto"].map(_norm_cod_alias),
+        }
+    )
+    maestro_keys = maestro_keys[maestro_keys["master_cod"] != ""]
+    if maestro_keys.empty:
+        return {}
 
-    code_counts = maestro.groupby("_cod_alias").size()
+    by_ruc_cod = maestro_keys.drop_duplicates(["ruc", "master_cod"], keep="last")
+    merged = aliases_df.merge(
+        by_ruc_cod,
+        on=["ruc", "master_cod"],
+        how="left",
+    )
+
+    code_counts = maestro_keys.groupby("master_cod", sort=False)["idx"].nunique()
     unique_codes = set(code_counts[code_counts.eq(1)].index.astype(str))
-    by_unique_cod = {
-        str(row["_cod_alias"]): idx
-        for idx, row in maestro.iterrows()
-        if str(row["_cod_alias"]) in unique_codes
-    }
+    by_unique_cod = (
+        maestro_keys[maestro_keys["master_cod"].isin(unique_codes)]
+        .drop_duplicates("master_cod", keep="last")[["master_cod", "idx"]]
+        .rename(columns={"idx": "idx_unique"})
+    )
+
+    merged = merged.merge(by_unique_cod, on="master_cod", how="left")
+    merged["idx_final"] = merged["idx"].where(merged["idx"].notna(), merged["idx_unique"])
+    merged = merged.dropna(subset=["idx_final"])
 
     out: dict[tuple[str, str], int] = {}
-    for ruc, fact_cod, master_cod in aliases:
-        idx = by_ruc_cod.get((ruc, master_cod))
-        if idx is None:
-            idx = by_unique_cod.get(master_cod)
-        if idx is not None:
-            out[(ruc, fact_cod)] = idx
+    for ruc, fact_cod, idx in merged[["ruc", "fact_cod", "idx_final"]].itertuples(index=False, name=None):
+        if isinstance(idx, float) and idx.is_integer():
+            idx = int(idx)
+        out[(str(ruc), str(fact_cod))] = idx
 
     return out
+
+
+@lru_cache(maxsize=64)
+def _load_learned_alias_index(tenant: str = DEFAULT_TENANT) -> dict[tuple[str, str], int]:
+    """Carga y cachea el índice de pares positivos por tenant."""
+    tenant_norm = normalizar_tenant(tenant)
+    maestro_p, _, _ = _load_homologador_context(tenant_norm)
+    return _build_learned_alias_index(maestro_p, _load_positive_aliases(tenant_norm))
 
 
 def _filtrar_columnas_resultado(resultado: pd.DataFrame) -> pd.DataFrame:
@@ -457,10 +498,7 @@ def homologar_items(
     try:
         maestro_p, idx, maestro_emb = _load_homologador_context(tenant_norm)
         modelo_homologador = _load_homologador_model(tenant_norm)
-        learned_alias_idx = _build_learned_alias_index(
-            maestro_p,
-            _load_positive_aliases(tenant_norm),
-        )
+        learned_alias_idx = _load_learned_alias_index(tenant_norm)
         quantity_conversion_lookup = _load_quantity_conversion_lookup(tenant_norm)
 
         for inicio in range(0, len(facturas), batch_size):

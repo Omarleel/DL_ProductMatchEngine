@@ -137,7 +137,14 @@ def _limpiar_cache_inferencia_homologador() -> None:
         inferencia._load_homologador_model.cache_clear()
         inferencia._load_homologador_context.cache_clear()
         inferencia._load_positive_aliases.cache_clear()
+        inferencia._load_learned_alias_index.cache_clear()
         inferencia._load_quantity_conversion_lookup.cache_clear()
+        try:
+            from ml_pipeline.utils import matching as matching_utils
+
+            matching_utils._MAESTRO_POR_RUC_CACHE.clear()
+        except Exception:
+            pass
     except Exception:
         # El entrenamiento ya terminó; no conviene fallar solo por limpieza de cache.
         pass

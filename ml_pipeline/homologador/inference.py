@@ -19,6 +19,17 @@ from ml_pipeline.utils.limpieza import normalizar_codigo, normalizar_unidad
 from .feature_engineering import add_aux_pair_features
 
 
+_INTERNAL_MAESTRO_COLUMNS = ("_row_idx", "_ruc_norm")
+
+
+def _drop_internal_maestro_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop(columns=list(_INTERNAL_MAESTRO_COLUMNS), errors="ignore")
+
+
+def _drop_internal_maestro_labels(row: pd.Series) -> pd.Series:
+    return row.drop(labels=list(_INTERNAL_MAESTRO_COLUMNS), errors="ignore")
+
+
 def _safe_float(value, default: float = 0.0) -> float:
     try:
         if value is None or pd.isna(value):
@@ -313,7 +324,7 @@ def _embedding_shortlist(
     f_df = pd.DataFrame([f])
     fact_emb = modelo_match.encode_prepared_items(f_df)[0]
 
-    ruc_key = str(f["RucProveedor"]).strip()
+    ruc_key = _norm_ruc_alias(f.get("RucProveedor", ""))
     local_mask = (maestro_p["_ruc_norm"] == ruc_key).values
 
     if int(local_mask.sum()) >= min(20, max(10, top_n // 2)):
@@ -358,7 +369,7 @@ def _hybrid_candidates(
 
     cand_lex = recuperar_candidatos(
         fila_factura=f,
-        maestro=maestro_p.drop(columns=["_row_idx", "_ruc_norm"], errors="ignore"),
+        maestro=maestro_p,
         top_n=top_n_lexical,
     ).copy()
 
@@ -507,14 +518,15 @@ def inferir_codproducto_homologador(
     fact_p = preparar_facturas(productos_facturas)
     resultados: list[dict] = []
 
-    maestro_p = maestro_p.copy()
-    maestro_p["_row_idx"] = np.arange(len(maestro_p), dtype=np.int32)
-    maestro_p["_ruc_norm"] = maestro_p["RucProveedor"].astype(str).fillna("").str.strip()
+    if any(col not in maestro_p.columns for col in _INTERNAL_MAESTRO_COLUMNS):
+        maestro_p = maestro_p.copy()
+        if "_row_idx" not in maestro_p.columns:
+            maestro_p["_row_idx"] = np.arange(len(maestro_p), dtype=np.int32)
+        if "_ruc_norm" not in maestro_p.columns:
+            maestro_p["_ruc_norm"] = maestro_p["RucProveedor"].map(_norm_ruc_alias)
 
     if maestro_emb is None or len(maestro_emb) != len(maestro_p):
-        maestro_emb = modelo_match.encode_prepared_items(
-            maestro_p.drop(columns=["_row_idx", "_ruc_norm"], errors="ignore")
-        )
+        maestro_emb = modelo_match.encode_prepared_items(_drop_internal_maestro_columns(maestro_p))
 
     for _, f in fact_p.iterrows():
         ruc_original = str(f.get("RucProveedor", "")).strip()
@@ -537,7 +549,7 @@ def inferir_codproducto_homologador(
                 exacto_origen = "EXACTO_RUC_EQUIVALENTE"
 
         if exacto is not None:
-            row = exacto.drop(labels=["_row_idx", "_ruc_norm"], errors="ignore").to_dict()
+            row = _drop_internal_maestro_labels(exacto).to_dict()
             row.update({
                 "OrigenCandidato": exacto_origen,
                 "EmbeddingScore": 1.0,
@@ -604,7 +616,7 @@ def inferir_codproducto_homologador(
         tipo = "TENTATIVO" if tentative_ok else "POSIBLE_NUEVO_PRODUCTO"
 
         for rank, (_, c) in enumerate(cand.iterrows(), start=1):
-            row = c.drop(labels=["_row_idx", "_ruc_norm"], errors="ignore").to_dict()
+            row = _drop_internal_maestro_labels(c).to_dict()
             row.update({
                 "TipoResultado": tipo if rank == 1 else "ALTERNATIVA",
                 **_build_factura_output_fields(f, c, quantity_conversion_lookup),
