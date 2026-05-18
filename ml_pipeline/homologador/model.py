@@ -15,7 +15,7 @@ from ml_pipeline.core.weighting import SampleWeightStrategy
 from .builder import MatchModelBuilder2
 from .config import Model2Config
 from .dataset import DatasetBuilder2
-from .persistence import ModelPersistence2
+from .persistence import HomologatorModelPersistence
 from .preprocessing import PreprocessingAssets2
 from .feature_engineering import AUX_FEATURE_COLUMNS, add_aux_pair_features
 from ml_pipeline.utils.training_logger import TrainingLogger
@@ -60,13 +60,13 @@ class ModeloHomologadorProductos:
         self.best_threshold: float = 0.72
 
     def guardar(self, carpeta_modelo: str) -> None:
-        ModelPersistence2.save(self, carpeta_modelo)
+        HomologatorModelPersistence.save(self, carpeta_modelo)
 
     @classmethod
     def cargar(cls, carpeta_modelo: str) -> "ModeloHomologadorProductos":
-        config = ModelPersistence2.read_config(carpeta_modelo)
+        config = HomologatorModelPersistence.read_config(carpeta_modelo)
         instancia = cls(**asdict(config))
-        ModelPersistence2.load(instancia, carpeta_modelo)
+        HomologatorModelPersistence.load(instancia, carpeta_modelo)
         return instancia
 
     def construir(self) -> tf.keras.Model:

@@ -14,7 +14,7 @@ PathLike = Union[str, Path]
 JsonPayload = Union[dict, list]
 
 
-class ModelPersistence2:
+class HomologatorModelPersistence:
     @staticmethod
     def save(instance: "ModeloHomologadorProductos", carpeta_modelo: PathLike) -> None:
         path = Path(carpeta_modelo).expanduser()
@@ -37,10 +37,10 @@ class ModelPersistence2:
 
         # 2. Vocabularios
         try:
-            ModelPersistence2._write_json(path / "word_vocabulary.json", instance.assets.word_vec.get_vocabulary())
-            ModelPersistence2._write_json(path / "char_vocabulary.json", instance.assets.char_vec.get_vocabulary())
-            ModelPersistence2._write_json(path / "unit_vocabulary.json", instance.assets.unit_lookup.get_vocabulary())
-            ModelPersistence2._write_json(path / "type_vocabulary.json", instance.assets.type_lookup.get_vocabulary())
+            HomologatorModelPersistence._write_json(path / "word_vocabulary.json", instance.assets.word_vec.get_vocabulary())
+            HomologatorModelPersistence._write_json(path / "char_vocabulary.json", instance.assets.char_vec.get_vocabulary())
+            HomologatorModelPersistence._write_json(path / "unit_vocabulary.json", instance.assets.unit_lookup.get_vocabulary())
+            HomologatorModelPersistence._write_json(path / "type_vocabulary.json", instance.assets.type_lookup.get_vocabulary())
         except Exception as e:
             log_errors.append(f"Error guardando vocabularios: {e}")
 
@@ -60,7 +60,7 @@ class ModelPersistence2:
         # 4. Meta
         try:
             meta = asdict(instance.config) | {"best_threshold": instance.best_threshold}
-            ModelPersistence2._write_json(path / "meta.json", meta)
+            HomologatorModelPersistence._write_json(path / "meta.json", meta)
         except Exception as e:
             log_errors.append(f"Error guardando meta: {e}")
 
@@ -73,23 +73,23 @@ class ModelPersistence2:
     def load(instance: "ModeloHomologadorProductos", carpeta_modelo: PathLike) -> None:
         path = Path(carpeta_modelo).expanduser()
 
-        ModelPersistence2._require_file(path / "meta.json")
-        ModelPersistence2._require_file(path / "pair_model.weights.index")
-        #ModelPersistence2._require_file(path / "pair_model.weights.h5")
-        ModelPersistence2._require_file(path / "word_vocabulary.json")
-        ModelPersistence2._require_file(path / "char_vocabulary.json")
-        ModelPersistence2._require_file(path / "unit_vocabulary.json")
-        ModelPersistence2._require_file(path / "type_vocabulary.json")
+        HomologatorModelPersistence._require_file(path / "meta.json")
+        HomologatorModelPersistence._require_file(path / "pair_model.weights.index")
+        #HomologatorModelPersistence._require_file(path / "pair_model.weights.h5")
+        HomologatorModelPersistence._require_file(path / "word_vocabulary.json")
+        HomologatorModelPersistence._require_file(path / "char_vocabulary.json")
+        HomologatorModelPersistence._require_file(path / "unit_vocabulary.json")
+        HomologatorModelPersistence._require_file(path / "type_vocabulary.json")
 
-        instance.assets.word_vec.set_vocabulary(ModelPersistence2._read_json(path / "word_vocabulary.json"))
-        instance.assets.char_vec.set_vocabulary(ModelPersistence2._read_json(path / "char_vocabulary.json"))
-        ModelPersistence2._safe_set_lookup_vocabulary(
+        instance.assets.word_vec.set_vocabulary(HomologatorModelPersistence._read_json(path / "word_vocabulary.json"))
+        instance.assets.char_vec.set_vocabulary(HomologatorModelPersistence._read_json(path / "char_vocabulary.json"))
+        HomologatorModelPersistence._safe_set_lookup_vocabulary(
             instance.assets.unit_lookup,
-            ModelPersistence2._read_json(path / "unit_vocabulary.json"),
+            HomologatorModelPersistence._read_json(path / "unit_vocabulary.json"),
         )
-        ModelPersistence2._safe_set_lookup_vocabulary(
+        HomologatorModelPersistence._safe_set_lookup_vocabulary(
             instance.assets.type_lookup,
-            ModelPersistence2._read_json(path / "type_vocabulary.json"),
+            HomologatorModelPersistence._read_json(path / "type_vocabulary.json"),
         )
 
         instance.construir()
@@ -97,7 +97,7 @@ class ModelPersistence2:
         normalizer_dir = path / "normalizers"
         for base, normalizer in instance.assets.normalizers.items():
             npz_path = normalizer_dir / f"{base}.npz"
-            ModelPersistence2._require_file(npz_path)
+            HomologatorModelPersistence._require_file(npz_path)
             with np.load(npz_path, allow_pickle=True) as data:
                 keys = sorted(data.files, key=lambda x: int(x.split("_")[1]))
                 weights = [data[k] for k in keys]
@@ -105,15 +105,15 @@ class ModelPersistence2:
 
         #instance.model.load_weights(path / "pair_model.weights.h5")
         instance.model.load_weights(path / "pair_model.weights")
-        meta = ModelPersistence2._read_json(path / "meta.json")
+        meta = HomologatorModelPersistence._read_json(path / "meta.json")
         instance.best_threshold = float(meta.get("best_threshold", 0.72))
 
     @staticmethod
     def read_config(carpeta_modelo: PathLike) -> Model2Config:
         meta_path = Path(carpeta_modelo).expanduser() / "meta.json"
-        ModelPersistence2._require_file(meta_path)
+        HomologatorModelPersistence._require_file(meta_path)
 
-        meta = ModelPersistence2._read_json(meta_path)
+        meta = HomologatorModelPersistence._read_json(meta_path)
         return Model2Config(
             max_tokens=meta.get("max_tokens", 18000),
             max_char_tokens=meta.get("max_char_tokens", 160),

@@ -16,7 +16,7 @@ from .config import AttributeModelConfigV2
 from .dataset import AttributeDatasetBuilderV2
 from .feature_engineering import add_item_aux_features
 from .labels import MISSING_BRAND, MISSING_CATEGORY
-from .persistence import AttributeModelPersistenceV2
+from .persistence import AttributeModelPersistence
 from .preprocessing import PreprocessingAssetsAttrV2
 from ml_pipeline.utils.training_logger import TrainingLogger
 
@@ -67,13 +67,13 @@ class ModeloClasificadorProductos:
         return self.model
 
     def guardar(self, carpeta_modelo: str) -> None:
-        AttributeModelPersistenceV2.save(self, carpeta_modelo)
+        AttributeModelPersistence.save(self, carpeta_modelo)
 
     @classmethod
     def cargar(cls, carpeta_modelo: str) -> "ModeloClasificadorProductos":
-        config = AttributeModelPersistenceV2.read_config(carpeta_modelo)
+        config = AttributeModelPersistence.read_config(carpeta_modelo)
         instancia = cls(**asdict(config))
-        AttributeModelPersistenceV2.load(instancia, carpeta_modelo)
+        AttributeModelPersistence.load(instancia, carpeta_modelo)
         return instancia
 
     def _class_weight_map(self, values: pd.Series, missing_label: str) -> dict[str, float]:

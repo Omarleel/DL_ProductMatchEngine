@@ -12,7 +12,7 @@ from .config import AttributeModelConfigV2
 PathLike = Union[str, Path]
 
 
-class AttributeModelPersistenceV2:
+class AttributeModelPersistence:
     @staticmethod
     def save(instance: "ModeloClasificadorProductos", carpeta_modelo: PathLike) -> None:
         if instance.model is None:
@@ -22,15 +22,15 @@ class AttributeModelPersistenceV2:
 
         #instance.model.save_weights(path / "attribute_model_v2.weight.h5")
         instance.model.save_weights(path / "attribute_model_v2.weights", save_format='tf')
-        AttributeModelPersistenceV2._write_json(path / "word_vocabulary.json", instance.assets.word_vec.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "char_vocabulary.json", instance.assets.char_vec.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "provider_vocabulary.json", instance.assets.provider_lookup.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "unit_vocabulary.json", instance.assets.unit_lookup.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "type_vocabulary.json", instance.assets.type_lookup.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "brand_hint_vocabulary.json", instance.assets.brand_hint_lookup.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "category_hint_vocabulary.json", instance.assets.category_hint_lookup.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "target_brand_vocabulary.json", instance.assets.target_brand_lookup.get_vocabulary())
-        AttributeModelPersistenceV2._write_json(path / "target_category_vocabulary.json", instance.assets.target_category_lookup.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "word_vocabulary.json", instance.assets.word_vec.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "char_vocabulary.json", instance.assets.char_vec.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "provider_vocabulary.json", instance.assets.provider_lookup.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "unit_vocabulary.json", instance.assets.unit_lookup.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "type_vocabulary.json", instance.assets.type_lookup.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "brand_hint_vocabulary.json", instance.assets.brand_hint_lookup.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "category_hint_vocabulary.json", instance.assets.category_hint_lookup.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "target_brand_vocabulary.json", instance.assets.target_brand_lookup.get_vocabulary())
+        AttributeModelPersistence._write_json(path / "target_category_vocabulary.json", instance.assets.target_category_lookup.get_vocabulary())
 
         normalizer_dir = path / "normalizers"
         normalizer_dir.mkdir(exist_ok=True)
@@ -46,15 +46,15 @@ class AttributeModelPersistenceV2:
 
         meta = asdict(instance.config)
         meta["has_category_lexicon"] = instance.category_lexicon is not None
-        AttributeModelPersistenceV2._write_json(path / "meta.json", meta)
+        AttributeModelPersistence._write_json(path / "meta.json", meta)
 
     @staticmethod
     def load(instance: "ModeloClasificadorProductos", carpeta_modelo: PathLike) -> None:
         path = Path(carpeta_modelo).expanduser()
-        AttributeModelPersistenceV2._require_file(path / "meta.json")
+        AttributeModelPersistence._require_file(path / "meta.json")
 
-        instance.assets.word_vec.set_vocabulary(AttributeModelPersistenceV2._read_json(path / "word_vocabulary.json"))
-        instance.assets.char_vec.set_vocabulary(AttributeModelPersistenceV2._read_json(path / "char_vocabulary.json"))
+        instance.assets.word_vec.set_vocabulary(AttributeModelPersistence._read_json(path / "word_vocabulary.json"))
+        instance.assets.char_vec.set_vocabulary(AttributeModelPersistence._read_json(path / "char_vocabulary.json"))
         for layer_name, vocab_file in [
             (instance.assets.provider_lookup, "provider_vocabulary.json"),
             (instance.assets.unit_lookup, "unit_vocabulary.json"),
@@ -64,20 +64,20 @@ class AttributeModelPersistenceV2:
             (instance.assets.target_brand_lookup, "target_brand_vocabulary.json"),
             (instance.assets.target_category_lookup, "target_category_vocabulary.json"),
         ]:
-            AttributeModelPersistenceV2._safe_set_lookup_vocabulary(layer_name, AttributeModelPersistenceV2._read_json(path / vocab_file))
+            AttributeModelPersistence._safe_set_lookup_vocabulary(layer_name, AttributeModelPersistence._read_json(path / vocab_file))
 
         instance.construir()
 
         normalizer_dir = path / "normalizers"
         for base, normalizer in instance.assets.numeric_normalizers.items():
             npz_path = normalizer_dir / f"{base}.npz"
-            AttributeModelPersistenceV2._require_file(npz_path)
+            AttributeModelPersistence._require_file(npz_path)
             with np.load(npz_path, allow_pickle=True) as data:
                 keys = sorted(data.files, key=lambda x: int(x.split("_")[1]))
                 normalizer.set_weights([data[k] for k in keys])
 
         aux_path = normalizer_dir / "aux_num.npz"
-        AttributeModelPersistenceV2._require_file(aux_path)
+        AttributeModelPersistence._require_file(aux_path)
         with np.load(aux_path, allow_pickle=True) as data:
             keys = sorted(data.files, key=lambda x: int(x.split("_")[1]))
             instance.assets.aux_normalizer.set_weights([data[k] for k in keys])
@@ -92,7 +92,7 @@ class AttributeModelPersistenceV2:
 
     @staticmethod
     def read_config(carpeta_modelo: PathLike) -> AttributeModelConfigV2:
-        meta = AttributeModelPersistenceV2._read_json(Path(carpeta_modelo).expanduser() / "meta.json")
+        meta = AttributeModelPersistence._read_json(Path(carpeta_modelo).expanduser() / "meta.json")
         return AttributeModelConfigV2(
             max_tokens=meta.get("max_tokens", 25000),
             max_char_tokens=meta.get("max_char_tokens", 260),

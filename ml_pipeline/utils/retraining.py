@@ -55,10 +55,13 @@ class TrainingLock:
         self.release()
 
 
-def build_run_id(prefix: str) -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    suffix = uuid4().hex[:8]
-    return f"{prefix}_{timestamp}_{suffix}"
+def build_run_id(prefix: str = "") -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%y%m%d_%H%M")
+    suffix = uuid4().hex[:4]
+    
+    if prefix:
+        return f"{prefix}_{timestamp}_{suffix}"
+    return f"{timestamp}_{suffix}"
 
 
 def write_json(path: Path, payload: Any) -> None:
