@@ -1,0 +1,21 @@
+# Entorno
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Variables de entorno
+.env
+
+# Datos y artefactos
+/data/*
+/artifacts/*
+
+# IDE
+.vscode/
+.idea/
+
+# SO
+.DS_Store
+Thumbs.db
