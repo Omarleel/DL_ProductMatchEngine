@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import AliasChoices, BaseModel, Field
 from app.services.tenant_service import DEFAULT_TENANT
 
@@ -22,3 +24,5 @@ class GenerarDatasetsResponse(BaseModel):
     tenant: str
     maestro: DatasetGeneradoInfo
     productos_facturas: DatasetGeneradoInfo
+    conversion_unidades_raw: Optional[DatasetGeneradoInfo] = None
+    diccionario_conversion_unidades: Optional[DatasetGeneradoInfo] = None

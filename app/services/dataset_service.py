@@ -8,6 +8,7 @@ import pyodbc
 from app.core.config import CONFIG_SEDES, get_settings
 from app.services.maestro_service import limpiar_cache_maestro
 from app.services.tenant_service import get_tenant_raw_data_dir, normalizar_tenant
+from ml_pipeline.utils.limpieza import normalizar_codigo, normalizar_unidad
 
 
 SQL_MAESTRO_REX = """
@@ -164,6 +165,60 @@ ORDER BY CodProductoMaestro ASC;
 """
 
 
+SQL_CONVERSION_UNIDADES_REX = """
+WITH CpeItemsNumerados AS (
+    SELECT 
+        ci.CarSunat, 
+        COALESCE(ci.CodProducto, ci.CodProdGS1) AS CodProducto, 
+        ci.Descripcion, 
+        ci.Cantidad,
+        ci.CodUnidadMedida,
+        ci.Total,
+        ROW_NUMBER() OVER (
+            PARTITION BY ci.CarSunat 
+            ORDER BY ci.Id
+        ) AS NumItem
+    FROM CpeItems ci
+    INNER JOIN Cpe c ON ci.CarSunat = c.CarSunat AND c.TipoDoc = '01'
+)
+SELECT 
+    CONCAT(
+        LTRIM(RTRIM(p.cproveedor_ruc)),
+        '01',
+        SUBSTRING(LTRIM(RTRIM(m.cmovimiento_nro_sunat)), 1, 4),
+        RIGHT('0000000000' + SUBSTRING(LTRIM(RTRIM(m.cmovimiento_nro_sunat)), 5, 20), 10),
+        RIGHT('000' + LTRIM(RTRIM(md.cmovimiento_detalle_item)), 3)
+    ) AS CarSunatItem,
+    LTRIM(RTRIM(p.cproveedor_ruc)) AS RucProveedor,
+    RTRIM(a.carticulos_id) AS CodProductoMaestro,
+    a.carticulos_nombre ProductoMaestro,
+    md.ncantidad_compra AS CantidadCompra,
+    md.cunidad_compra AS UnidadMedidaCompra,
+    cin.CodProducto AS CodProductoCpe,
+    cin.Descripcion AS ProductoCpe,
+    cin.Cantidad AS CantidadCpe,
+    cin.CodUnidadMedida AS UnidadMedidaCpe
+FROM [_movimiento] m 
+INNER JOIN [_movimiento_detalle] md ON md.cmovimiento_id = m.cmovimiento_id
+INNER JOIN [_proveedor] p ON p.cproveedor_id = m.cproveedor_id
+INNER JOIN [_articulos] a ON a.carticulos_id = md.carticulos_id 
+LEFT JOIN CpeItemsNumerados cin 
+    ON CONCAT(cin.CarSunat, RIGHT('000' + CAST(cin.NumItem AS VARCHAR(3)), 3)) = CONCAT(
+        LTRIM(RTRIM(p.cproveedor_ruc)), 
+        '01',                            
+        SUBSTRING(LTRIM(RTRIM(m.cmovimiento_nro_sunat)), 1, 4), 
+        RIGHT('0000000000' + SUBSTRING(LTRIM(RTRIM(m.cmovimiento_nro_sunat)), 5, 20), 10), 
+        RIGHT('000' + LTRIM(RTRIM(md.cmovimiento_detalle_item)), 3) 
+    )
+WHERE m.dmovimiento_fechahora >= DATEADD(YEAR, -1, CAST(GETDATE() AS DATE))
+  AND m.calmacenes_origen_id = '001'
+  AND m.cmovimiento_estado = 'Ad'
+  AND m.cmovimiento_tipo = 'I'
+  AND LTRIM(RTRIM(m.cmovimiento_nro_sunat)) LIKE '%[0-9]'
+  AND ABS(cin.Total - md.nmovimiento_detalle_valor_venta_soles) < 1
+ORDER BY CarSunatItem ASC;
+"""
+
 SQL_MAESTRO_PORTALES = """
 WITH UltimoCosto AS (
     SELECT imd.ProductoId, im.FechaEmision, imd.PrecioUnitario AS CostoUnitario,
@@ -268,7 +323,7 @@ MatchesPaginados AS (
             ORDER BY cd.FechaEmision DESC, cd.Id DESC
         ) AS Fila
     FROM CabeceraDocumento cd (NOLOCK)
-    INNER JOIN DetallesErpNumerados dd ON dd.CabeceraDocumentoId = cd.Id 
+    INNER JOIN DetallesErpNumerados dd (NOLOCK) ON dd.CabeceraDocumentoId = cd.Id 
     INNER JOIN Producto pr (NOLOCK) ON pr.Id = dd.ProductoId 
     INNER JOIN Proveedor p (NOLOCK) ON p.Id = cd.ProveedorId 
     INNER JOIN Persona p2 (NOLOCK) ON p2.Id = p.PersonaId
@@ -296,16 +351,87 @@ WHERE Fila = 1
 ORDER BY CodProductoMaestro ASC;
 """
 
+SQL_CONVERSION_UNIDADES_PORTALES = """
+WITH CpeItemsNumerados AS (
+    SELECT 
+        ci.CarSunat, 
+        COALESCE(ci.CodProducto, ci.CodProdGS1) AS CodProducto, 
+        ci.Descripcion, 
+        ci.Cantidad,
+        ci.CodUnidadMedida,
+        ci.Total,
+        ROW_NUMBER() OVER (
+            PARTITION BY ci.CarSunat 
+            ORDER BY ci.Id
+        ) AS NumItem
+    FROM CpeItems ci
+    INNER JOIN Cpe c ON ci.CarSunat = c.CarSunat AND c.TipoDoc = '01'
+),
+DetallesErpNumerados AS (
+    SELECT 
+        dd.Id,
+        dd.CabeceraDocumentoId,
+        dd.ProductoId,
+        dd.Cantidad,
+        dd.UnidadMedidaId,
+        dd.PrecioTotal,
+        ROW_NUMBER() OVER (
+            PARTITION BY dd.CabeceraDocumentoId 
+            ORDER BY dd.Id
+        ) AS NumItemErp
+    FROM DetalleDocumento dd (NOLOCK)
+    WHERE dd.EstadoRegistro = 1
+)
+SELECT 
+     CONCAT(
+        LTRIM(RTRIM(p2.NroDocumento)),                     -- RUC (11 chars)
+        '01',                                              -- Tipo Doc ('01' para Facturas)
+        SUBSTRING(LTRIM(RTRIM(cd.Serie)), 1, 4),           -- Serie (4 chars)
+        RIGHT('0000000000' + LTRIM(RTRIM(cd.Correlativo)), 10), -- Correlativo (10 chars)
+        RIGHT('000' + CAST(dd.NumItemErp AS VARCHAR(3)), 3)     -- Ítem calculado (3 chars)
+    ) AS CarSunatItem,
+    LTRIM(RTRIM(p2.NroDocumento)) AS RucProveedor,
+    RTRIM(pr.Id) AS CodProductoMaestro,
+    RTRIM(pr.DescripcionLarga) ProductoMaestro,
+    dd.Cantidad AS CantidadCompra,
+    RTRIM(um.Descripcion) AS UnidadMedidaCompra,
+    cin.CodProducto AS CodProductoCpe,
+    cin.Descripcion AS ProductoCpe,
+    cin.Cantidad AS CantidadCpe,
+    cin.CodUnidadMedida AS UnidadMedidaCpe
+FROM CabeceraDocumento cd (NOLOCK)
+INNER JOIN DetallesErpNumerados dd (NOLOCK) ON dd.CabeceraDocumentoId = cd.Id 
+INNER JOIN Producto pr (NOLOCK) ON pr.Id = dd.ProductoId 
+INNER JOIN Proveedor p (NOLOCK) ON p.Id = cd.ProveedorId 
+INNER JOIN Persona p2 (NOLOCK) ON p2.Id = p.PersonaId
+INNER JOIN UnidadMedida um (NOLOCK) ON um.Id = dd.UnidadMedidaId
+INNER JOIN CpeItemsNumerados cin
+ON CONCAT(cin.CarSunat, RIGHT('000' + CAST(cin.NumItem AS VARCHAR(3)), 3)) = CONCAT(
+    LTRIM(RTRIM(p2.NroDocumento)),                     -- RUC (11 chars)
+    '01',                                              -- Tipo Doc ('01' para Facturas)
+    SUBSTRING(LTRIM(RTRIM(cd.Serie)), 1, 4),           -- Serie (4 chars)
+    RIGHT('0000000000' + LTRIM(RTRIM(cd.Correlativo)), 10), -- Correlativo (10 chars)
+    RIGHT('000' + CAST(dd.NumItemErp AS VARCHAR(3)), 3)     -- Ítem calculado (3 chars)
+)
+WHERE cd.TipoDocumentoRelacionadoId IN (1, 2, 5, 7) 
+    AND cd.EstadoRegistro = 1 
+    AND cd.FechaEmision >= DATEADD(YEAR, -1, CAST(GETDATE() AS DATE))
+    AND ABS(cin.Total - dd.PrecioTotal) < 1 
+ORDER BY CarSunatItem ASC;
+"""
+
 QUERIES_MAP = {
     "PORTALES": {
         "maestro": SQL_MAESTRO_PORTALES,
         "facturas": SQL_FACTURAS_NUEVAS_PORTALES,
         "auto_match": SQL_AUTOHOMOLOGACION_PORTALES,
+        "conversion_unidades": SQL_CONVERSION_UNIDADES_PORTALES,
     },
     "REX": {
         "maestro": SQL_MAESTRO_REX,
         "facturas": SQL_FACTURAS_NUEVAS_REX,
         "auto_match": SQL_AUTOHOMOLOGACION_REX,
+        "conversion_unidades": SQL_CONVERSION_UNIDADES_REX,
     },
 }
 
@@ -375,19 +501,171 @@ def _normalize_text_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].fillna("").astype(str).str.strip()
     return df
 
+
+def _normalizar_ruc_conversion(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
+def _modo_factor_conversion(group: pd.DataFrame) -> pd.Series:
+    """
+    Devuelve la moda del factor CantidadCompra/CantidadCpe para un grupo.
+
+    Se redondea el factor antes de calcular la moda porque las cantidades pueden venir
+    con decimales mínimos de SQL Server. En empates se elige el factor con más muestras,
+    luego el de mayor confianza y finalmente el menor factor para evitar sobreestimar.
+    """
+    counts = (
+        group.groupby("_factor_redondeado", dropna=False)
+        .size()
+        .reset_index(name="MuestrasModa")
+        .sort_values(["MuestrasModa", "_factor_redondeado"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
+
+    factor = float(counts.iloc[0]["_factor_redondeado"])
+    muestras_moda = int(counts.iloc[0]["MuestrasModa"])
+    muestras_total = int(len(group))
+    confianza = muestras_moda / muestras_total if muestras_total else 0.0
+
+    first = group.iloc[0]
+    return pd.Series({
+        "RucProveedor": first["RucProveedor"],
+        "CodProductoMaestro": first["CodProductoMaestro"],
+        "ProductoMaestro": first.get("ProductoMaestro", ""),
+        "CodProductoCpe": first["CodProductoCpe"],
+        "ProductoCpe": first.get("ProductoCpe", ""),
+        "UnidadMedidaCpe": first["UnidadMedidaCpe"],
+        "UnidadMedidaCompra": first["UnidadMedidaCompra"],
+        "FactorCantidadCompra": factor,
+        "Muestras": muestras_total,
+        "MuestrasModa": muestras_moda,
+        "ConfianzaModa": round(confianza, 6),
+    })
+
+
+def construir_diccionario_conversion_unidades(conversion_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye el diccionario final de conversión de cantidades.
+
+    Cada fila histórica indica cuánta cantidad del CPE fue digitada como cantidad de compra.
+    La regla aprendida es:
+
+        CantidadCompraInferida = CantidadCpeFactura * FactorCantidadCompra
+
+    Donde FactorCantidadCompra es la moda de CantidadCompra / CantidadCpe por:
+    RUC + producto maestro + código CPE + unidad CPE + unidad compra.
+    """
+    if conversion_raw is None or conversion_raw.empty:
+        return pd.DataFrame()
+
+    df = _normalize_text_columns(conversion_raw)
+    required = {
+        "RucProveedor",
+        "CodProductoMaestro",
+        "CantidadCompra",
+        "UnidadMedidaCompra",
+        "CodProductoCpe",
+        "CantidadCpe",
+        "UnidadMedidaCpe",
+    }
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(
+            "La consulta de conversión de unidades debe retornar las columnas: "
+            f"{', '.join(sorted(required))}. Faltan: {', '.join(missing)}"
+        )
+
+    if "ProductoMaestro" not in df.columns:
+        df["ProductoMaestro"] = ""
+    if "ProductoCpe" not in df.columns:
+        df["ProductoCpe"] = ""
+
+    df["RucProveedor"] = df["RucProveedor"].map(_normalizar_ruc_conversion)
+    df["CodProductoMaestro"] = df["CodProductoMaestro"].map(normalizar_codigo)
+    df["CodProductoCpe"] = df["CodProductoCpe"].map(normalizar_codigo)
+    df["UnidadMedidaCompra"] = df["UnidadMedidaCompra"].map(normalizar_unidad)
+    df["UnidadMedidaCpe"] = df["UnidadMedidaCpe"].map(normalizar_unidad)
+    df["CantidadCompra"] = pd.to_numeric(df["CantidadCompra"], errors="coerce").fillna(0.0)
+    df["CantidadCpe"] = pd.to_numeric(df["CantidadCpe"], errors="coerce").fillna(0.0)
+
+    df = df[
+        (df["CodProductoMaestro"] != "")
+        & (df["CodProductoCpe"] != "")
+        & (df["CantidadCompra"] > 0.0)
+        & (df["CantidadCpe"] > 0.0)
+    ].copy()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df["_factor_redondeado"] = (df["CantidadCompra"] / df["CantidadCpe"]).round(6)
+    df = df[df["_factor_redondeado"] > 0.0].copy()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    group_cols = [
+        "RucProveedor",
+        "CodProductoMaestro",
+        "CodProductoCpe",
+        "UnidadMedidaCpe",
+        "UnidadMedidaCompra",
+    ]
+
+    diccionario = (
+        df.sort_values(group_cols + ["_factor_redondeado"])
+        .groupby(group_cols, dropna=False)
+        .apply(_modo_factor_conversion)
+        .reset_index(drop=True)
+    )
+
+    return diccionario.sort_values(
+        ["RucProveedor", "CodProductoMaestro", "CodProductoCpe", "UnidadMedidaCpe", "UnidadMedidaCompra"]
+    ).reset_index(drop=True)
+
+
+def generar_diccionario_conversion_unidades_raw(tenant: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    tenant_norm = normalizar_tenant(tenant)
+    sql = _get_query_for_sede(tenant, "conversion_unidades")
+    raw = _normalize_text_columns(_read_sql(sql, tenant))
+    diccionario = construir_diccionario_conversion_unidades(raw)
+    print(
+        "Diccionario de conversión cargado para "
+        f"tenant={tenant_norm}: raw_rows={len(raw)} dict_rows={len(diccionario)}"
+    )
+    return raw, diccionario
+
+
 def generar_datasets_raw(tenant: str, overwrite: bool = True) -> dict:
     tenant_norm = normalizar_tenant(tenant)
     print(f"Generando datasets para tenant={tenant_norm}...")
 
     maestro_df = _normalize_text_columns(_read_sql(_get_query_for_sede(tenant, "maestro"), tenant))
     facturas_df = _normalize_text_columns(_read_sql(_get_query_for_sede(tenant, "facturas"), tenant))
+    conversion_raw_df, conversion_dict_df = generar_diccionario_conversion_unidades_raw(tenant)
 
     raw_dir = get_tenant_raw_data_dir(tenant_norm)
     maestro_path = raw_dir / "maestro.csv"
     facturas_path = raw_dir / "productos_facturas.csv"
+    conversion_raw_path = raw_dir / "conversion_unidades_raw.csv"
+    conversion_dict_path = raw_dir / "diccionario_conversion_unidades.csv"
 
     if not overwrite:
-        existentes = [str(path) for path in (maestro_path, facturas_path) if path.exists()]
+        existentes = [
+            str(path)
+            for path in (maestro_path, facturas_path, conversion_raw_path, conversion_dict_path)
+            if path.exists()
+        ]
         if existentes:
             raise FileExistsError(
                 "Ya existen datasets para este tenant y overwrite=False: "
@@ -397,6 +675,8 @@ def generar_datasets_raw(tenant: str, overwrite: bool = True) -> dict:
     raw_dir.mkdir(parents=True, exist_ok=True)
     maestro_df.to_csv(maestro_path, index=False, encoding="utf-8-sig")
     facturas_df.to_csv(facturas_path, index=False, encoding="utf-8-sig")
+    conversion_raw_df.to_csv(conversion_raw_path, index=False, encoding="utf-8-sig")
+    conversion_dict_df.to_csv(conversion_dict_path, index=False, encoding="utf-8-sig")
     limpiar_cache_maestro(tenant_norm)
 
     return {
@@ -411,6 +691,16 @@ def generar_datasets_raw(tenant: str, overwrite: bool = True) -> dict:
             "nombre": "productos_facturas.csv",
             "filas": len(facturas_df),
             "ruta": str(facturas_path),
+        },
+        "conversion_unidades_raw": {
+            "nombre": "conversion_unidades_raw.csv",
+            "filas": len(conversion_raw_df),
+            "ruta": str(conversion_raw_path),
+        },
+        "diccionario_conversion_unidades": {
+            "nombre": "diccionario_conversion_unidades.csv",
+            "filas": len(conversion_dict_df),
+            "ruta": str(conversion_dict_path),
         },
     }
 

@@ -15,7 +15,7 @@ from ml_pipeline.utils.matching import (
     recuperar_candidatos,
 )
 from ml_pipeline.utils.preparacion import preparar_facturas, preparar_maestro
-from ml_pipeline.utils.limpieza import normalizar_codigo
+from ml_pipeline.utils.limpieza import normalizar_codigo, normalizar_unidad
 from .feature_engineering import add_aux_pair_features
 
 
@@ -80,6 +80,51 @@ def _norm_cod_alias(value) -> str:
     return normalizar_codigo(text)
 
 
+def _norm_unit_alias(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return normalizar_unidad(str(value).strip())
+
+
+def _buscar_conversion_cantidad(
+    fila_factura: pd.Series,
+    candidato: pd.Series,
+    quantity_conversion_lookup: Optional[dict] = None,
+) -> Optional[dict]:
+    if not quantity_conversion_lookup:
+        return None
+
+    ruc = _norm_ruc_alias(fila_factura.get("RucProveedor", ""))
+    cod_cpe = _norm_cod_alias(fila_factura.get("CodProducto", ""))
+    cod_master = _norm_cod_alias(candidato.get("CodProducto", ""))
+    unidad_cpe = _norm_unit_alias(fila_factura.get("UnidadMedidaCompra", ""))
+    unidad_compra = _norm_unit_alias(candidato.get("UnidadMedidaCompra", ""))
+
+    if not cod_cpe or not cod_master:
+        return None
+
+    candidates = [
+        ("exact", (ruc, cod_master, cod_cpe, unidad_cpe, unidad_compra)),
+        ("ruc_product", (ruc, cod_master, cod_cpe)),
+        ("global_exact", (cod_master, cod_cpe, unidad_cpe, unidad_compra)),
+        ("global_product", (cod_master, cod_cpe)),
+    ]
+
+    for index_name, key in candidates:
+        row = quantity_conversion_lookup.get(index_name, {}).get(key)
+        if row:
+            row = dict(row)
+            row["NivelMatchConversion"] = index_name
+            return row
+
+    return None
+
+
 def _buscar_match_aprendido(
     fila_factura: pd.Series,
     maestro: pd.DataFrame,
@@ -113,22 +158,24 @@ def _buscar_match_aprendido(
         return None
 
 
-def _build_factura_output_fields(f: pd.Series, candidato: Optional[pd.Series] = None) -> dict:
+def _build_factura_output_fields(
+    f: pd.Series,
+    candidato: Optional[pd.Series] = None,
+    quantity_conversion_lookup: Optional[dict] = None,
+) -> dict:
     """
     Campos comunes de salida para la línea de factura.
 
-    Si la factura trae ValorTotal y ya existe un candidato homologado,
-    se infiere la cantidad de presentaciones de compra así:
+    Prioridad para inferir cantidades:
+      1. Cantidad facturada * factor histórico del diccionario de conversión.
+      2. Fallback ValorTotal / CostoCaja del candidato cuando no hay conversión histórica.
 
-        CantidadCompraFactura = ValorTotalFactura / CostoCaja del candidato
-
-    Luego se infieren las unidades comerciales usando el factor del candidato
-    (FactorVenta o FactorConversion) para evitar usar una presentación errónea
-    extraída desde la unidad de la factura, por ejemplo PALETAS.
+    El booleano UsoFallbackValorTotal queda en True únicamente cuando se usó el fallback.
     """
     candidato = candidato if candidato is not None else pd.Series(dtype=object)
 
     valor_total = _safe_float(f.get("ValorTotal", 0.0))
+    cantidad_factura = _safe_float(f.get("Cantidad", 0.0))
     costo_candidato = _safe_float(candidato.get("CostoCaja", 0.0))
 
     factor_candidato = _first_positive(
@@ -149,27 +196,50 @@ def _build_factura_output_fields(f: pd.Series, candidato: Optional[pd.Series] = 
         f.get("PesoExtraidoKg", 0.0),
     )
 
+    conversion = _buscar_conversion_cantidad(f, candidato, quantity_conversion_lookup)
+    factor_conversion_cantidad = 0.0
+    conversion_encontrada = False
+    conversion_nivel = ""
+    conversion_muestras = 0.0
+    conversion_confianza = 0.0
+    unidad_cpe_usada = _norm_unit_alias(f.get("UnidadMedidaCompra", ""))
+    unidad_compra_usada = _norm_unit_alias(candidato.get("UnidadMedidaCompra", ""))
+
     cantidad_compra = 0.0
     cantidad_unidades = 0.0
     contenido_total_linea = 0.0
     peso_total_kg = 0.0
     cantidad_inferida_desde = ""
+    uso_fallback_valor_total = False
 
-    if valor_total > 0.0 and costo_candidato > 0.0:
+    if conversion is not None:
+        factor_conversion_cantidad = _safe_float(conversion.get("FactorCantidadCompra", 0.0))
+        if cantidad_factura > 0.0 and factor_conversion_cantidad > 0.0:
+            cantidad_compra = _round_quantity(cantidad_factura * factor_conversion_cantidad)
+            cantidad_inferida_desde = "DiccionarioConversionCantidad"
+            conversion_encontrada = True
+            conversion_nivel = str(conversion.get("NivelMatchConversion", ""))
+            conversion_muestras = _safe_float(conversion.get("MuestrasModa", conversion.get("Muestras", 0.0)))
+            conversion_confianza = _safe_float(conversion.get("ConfianzaModa", 0.0))
+            unidad_cpe_usada = str(conversion.get("UnidadMedidaCpe", unidad_cpe_usada))
+            unidad_compra_usada = str(conversion.get("UnidadMedidaCompra", unidad_compra_usada))
+
+    if cantidad_compra <= 0.0 and valor_total > 0.0 and costo_candidato > 0.0:
         cantidad_compra = _round_quantity(valor_total / costo_candidato)
-        cantidad_compra_calc = _safe_float(cantidad_compra)
         cantidad_inferida_desde = "ValorTotal/CostoCajaMaestro"
+        uso_fallback_valor_total = True
 
-        if factor_para_cantidad > 0.0:
-            cantidad_unidades = _round_quantity(cantidad_compra_calc * factor_para_cantidad)
+    cantidad_compra_calc = _safe_float(cantidad_compra)
+    if cantidad_compra_calc > 0.0 and factor_para_cantidad > 0.0:
+        cantidad_unidades = _round_quantity(cantidad_compra_calc * factor_para_cantidad)
 
-        cantidad_unidades_calc = _safe_float(cantidad_unidades)
+    cantidad_unidades_calc = _safe_float(cantidad_unidades)
 
-        if contenido_unidad > 0.0 and cantidad_unidades_calc > 0.0:
-            contenido_total_linea = cantidad_unidades_calc * contenido_unidad
+    if contenido_unidad > 0.0 and cantidad_unidades_calc > 0.0:
+        contenido_total_linea = cantidad_unidades_calc * contenido_unidad
 
-        if peso_unitario > 0.0 and cantidad_unidades_calc > 0.0:
-            peso_total_kg = cantidad_unidades_calc * peso_unitario
+    if peso_unitario > 0.0 and cantidad_unidades_calc > 0.0:
+        peso_total_kg = cantidad_unidades_calc * peso_unitario
 
     return {
         "CodFactura": f["CodProducto"],
@@ -178,6 +248,7 @@ def _build_factura_output_fields(f: pd.Series, candidato: Optional[pd.Series] = 
         "UnidadFactura": f["UnidadMedidaCompra"],
         "CostoFactura": f["CostoCaja"],
         "ValorTotalFactura": valor_total,
+        "CantidadFactura": _round_quantity(cantidad_factura),
         "FactorFactura": factor_factura,
         "ContenidoFactura": f["ContenidoUnidad"],
         "ContenidoTotalFactura": f["ContenidoTotal"],
@@ -186,10 +257,17 @@ def _build_factura_output_fields(f: pd.Series, candidato: Optional[pd.Series] = 
         "Unidad_norm_factura": f["Unidad_norm"],
         "Costo_log_factura": f["Costo_log"],
         "CantidadCompraFactura": _round_quantity(cantidad_compra),
-        "UnidadCompraCantidadFactura": candidato.get("UnidadMedidaCompra", ""),
+        "UnidadCompraCantidadFactura": unidad_compra_usada,
         "CantidadUnidadesFactura": _round_quantity(cantidad_unidades),
         "FactorCantidadUsado": _round_quantity(factor_para_cantidad),
         "CostoCajaCantidadUsado": costo_candidato,
+        "FactorConversionCantidadUsado": _round_quantity(factor_conversion_cantidad),
+        "UnidadMedidaCpeCantidadUsada": unidad_cpe_usada,
+        "ConversionCantidadEncontrada": bool(conversion_encontrada),
+        "ConversionCantidadNivel": conversion_nivel,
+        "ConversionCantidadMuestras": _round_quantity(conversion_muestras),
+        "ConversionCantidadConfianza": _round_quantity(conversion_confianza),
+        "UsoFallbackValorTotal": bool(uso_fallback_valor_total),
         "ContenidoTotalLineaFactura": _round_quantity(contenido_total_linea),
         "PesoTotalKgFactura": _round_quantity(peso_total_kg),
         "CantidadInferidaDesde": cantidad_inferida_desde,
@@ -398,6 +476,7 @@ def inferir_codproducto_homologador(
     top_n_candidates: int = 80,
     maestro: Optional[pd.DataFrame] = None,
     learned_alias_idx: Optional[dict[tuple[str, str], int]] = None,
+    quantity_conversion_lookup: Optional[dict] = None,
 ) -> pd.DataFrame:
     """Infiere el CodProducto usando un maestro preparado o un maestro crudo.
     """
@@ -470,7 +549,7 @@ def inferir_codproducto_homologador(
                 "ScoreFinal": 1.0,
                 "Score": 1.0,
                 "TipoResultado": exacto_origen,
-                **_build_factura_output_fields(f, exacto),
+                **_build_factura_output_fields(f, exacto, quantity_conversion_lookup),
                 "Rank": 1,
             })
             resultados.append(row)
@@ -488,7 +567,7 @@ def inferir_codproducto_homologador(
         if cand.empty:
             resultados.append({
                 "RucProveedor": f["RucProveedor"],
-                **_build_factura_output_fields(f),
+                **_build_factura_output_fields(f, quantity_conversion_lookup=quantity_conversion_lookup),
                 "TipoResultado": "SIN_CANDIDATOS",
                 "Score": 0.0,
                 "Rank": 1,
@@ -528,7 +607,7 @@ def inferir_codproducto_homologador(
             row = c.drop(labels=["_row_idx", "_ruc_norm"], errors="ignore").to_dict()
             row.update({
                 "TipoResultado": tipo if rank == 1 else "ALTERNATIVA",
-                **_build_factura_output_fields(f, c),
+                **_build_factura_output_fields(f, c, quantity_conversion_lookup),
                 "Rank": rank,
             })
             resultados.append(row)

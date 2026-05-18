@@ -14,6 +14,14 @@ class HomologacionItemRequest(BaseModel):
     UnidadMedidaCompra: Optional[str] = None
     CostoCaja: Optional[float] = 0.0
     ValorTotal: Optional[float] = 0.0
+    Cantidad: Optional[float] = Field(
+        default=0.0,
+        validation_alias=AliasChoices("Cantidad", "cantidad", "CantidadCpe", "cantidad_cpe"),
+        description=(
+            "Cantidad facturada en la unidad del CPE. Se usa para convertir a "
+            "cantidad de unidad de compra mediante el diccionario histórico."
+        ),
+    )
 
 
 class HomologacionRequest(BaseModel):

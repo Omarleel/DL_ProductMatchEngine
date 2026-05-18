@@ -16,6 +16,7 @@ from app.services.tenant_service import (
     DEFAULT_TENANT,
     get_tenant_artifacts_dir,
     get_tenant_processed_data_dir,
+    get_tenant_raw_data_dir,
     get_tenant_results_data_dir,
     normalizar_tenant,
 )
@@ -24,7 +25,7 @@ from ml_pipeline.homologador import (
     inferir_codproducto_homologador,
 )
 from ml_pipeline.utils.config import require_file
-from ml_pipeline.utils.limpieza import normalizar_codigo
+from ml_pipeline.utils.limpieza import normalizar_codigo, normalizar_unidad
 from ml_pipeline.utils.matching import construir_indice_codigos
 from ml_pipeline.utils.preparacion import preparar_maestro
 
@@ -36,9 +37,16 @@ COLUMNAS_RESULTADO_CSV = [
     "UnidadFactura",
     "CostoFactura",
     "ValorTotalFactura",
+    "CantidadFactura",
     "CantidadCompraFactura",
     "UnidadCompraCantidadFactura",
     "CantidadUnidadesFactura",
+    "FactorConversionCantidadUsado",
+    "ConversionCantidadEncontrada",
+    "ConversionCantidadNivel",
+    "ConversionCantidadMuestras",
+    "ConversionCantidadConfianza",
+    "UsoFallbackValorTotal",
     "ContenidoTotalLineaFactura",
     "PesoTotalKgFactura",
     "CodProducto",
@@ -107,10 +115,7 @@ def _norm_cod_alias(value) -> str:
 def _load_positive_aliases(tenant: str = DEFAULT_TENANT) -> tuple[tuple[str, str, str], ...]:
     """
     Carga equivalencias positivas generadas durante el entrenamiento.
-
-    Esto convierte un par ya visto (RUC, CodProducto de CPE/factura) -> CodProducto maestro
-    en una búsqueda exacta supervisada. Si el mismo par apunta a más de un maestro, se descarta
-    para no introducir ambigüedad.
+    (Versión Optimizada)
     """
     tenant_norm = normalizar_tenant(tenant)
     processed_dir = get_tenant_processed_data_dir(tenant_norm)
@@ -127,13 +132,14 @@ def _load_positive_aliases(tenant: str = DEFAULT_TENANT) -> tuple[tuple[str, str
         pares = pd.read_csv(
             path,
             encoding="utf-8-sig",
-            sep=None,
-            engine="python",
+            usecols=["RucProveedor", "fact_cod", "master_cod", "label"],
             dtype={
                 "RucProveedor": "string",
                 "fact_cod": "string",
                 "master_cod": "string",
             },
+            sep=";",
+            low_memory=False
         )
     except Exception:
         return tuple()
@@ -143,13 +149,15 @@ def _load_positive_aliases(tenant: str = DEFAULT_TENANT) -> tuple[tuple[str, str
         return tuple()
 
     label_num = pd.to_numeric(pares["label"], errors="coerce").fillna(0).astype(int)
-    pos = pares.loc[label_num.eq(1), ["RucProveedor", "fact_cod", "master_cod"]].copy()
+    pos = pares.loc[label_num == 1, ["RucProveedor", "fact_cod", "master_cod"]].copy()
+    
     if pos.empty:
         return tuple()
 
     pos["_ruc"] = pos["RucProveedor"].map(_norm_ruc_alias)
     pos["_fact"] = pos["fact_cod"].map(_norm_cod_alias)
     pos["_master"] = pos["master_cod"].map(_norm_cod_alias)
+    
     pos = pos[(pos["_fact"] != "") & (pos["_master"] != "")].drop_duplicates(
         subset=["_ruc", "_fact", "_master"]
     )
@@ -157,11 +165,150 @@ def _load_positive_aliases(tenant: str = DEFAULT_TENANT) -> tuple[tuple[str, str
     if pos.empty:
         return tuple()
 
-    counts = pos.groupby(["_ruc", "_fact"], dropna=False)["_master"].nunique()
-    valid_keys = set(counts[counts.eq(1)].index)
-    pos = pos[pos.apply(lambda r: (r["_ruc"], r["_fact"]) in valid_keys, axis=1)]
+    counts = pos.groupby(["_ruc", "_fact"], dropna=False)["_master"].transform("nunique")
+    pos = pos[counts == 1]
 
     return tuple(pos[["_ruc", "_fact", "_master"]].itertuples(index=False, name=None))
+
+def _norm_unit_alias(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return normalizar_unidad(str(value).strip())
+
+
+def _safe_float_conversion(value, default: float = 0.0) -> float:
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _prefer_conversion_row(current: Optional[dict], candidate: dict) -> dict:
+    if current is None:
+        return candidate
+
+    current_key = (
+        _safe_float_conversion(current.get("MuestrasModa", 0.0)),
+        _safe_float_conversion(current.get("ConfianzaModa", 0.0)),
+        _safe_float_conversion(current.get("Muestras", 0.0)),
+    )
+    candidate_key = (
+        _safe_float_conversion(candidate.get("MuestrasModa", 0.0)),
+        _safe_float_conversion(candidate.get("ConfianzaModa", 0.0)),
+        _safe_float_conversion(candidate.get("Muestras", 0.0)),
+    )
+    return candidate if candidate_key > current_key else current
+
+
+@lru_cache(maxsize=64)
+def _load_quantity_conversion_lookup(tenant: str = DEFAULT_TENANT) -> dict:
+    """Carga el diccionario histórico CantidadCPE -> CantidadCompra por tenant."""
+    tenant_norm = normalizar_tenant(tenant)
+    candidate_paths = [
+        get_tenant_raw_data_dir(tenant_norm) / "diccionario_conversion_unidades.csv",
+        get_tenant_processed_data_dir(tenant_norm) / "diccionario_conversion_unidades.csv",
+    ]
+    path = next((p for p in candidate_paths if p.exists()), None)
+    if path is None:
+        return {}
+
+    try:
+        df = pd.read_csv(
+            path,
+            encoding="utf-8-sig",
+            sep=None,
+            engine="python",
+            dtype={
+                "RucProveedor": "string",
+                "CodProductoMaestro": "string",
+                "CodProductoCpe": "string",
+                "UnidadMedidaCpe": "string",
+                "UnidadMedidaCompra": "string",
+            },
+        )
+    except Exception:
+        return {}
+
+    required = {
+        "RucProveedor",
+        "CodProductoMaestro",
+        "CodProductoCpe",
+        "UnidadMedidaCpe",
+        "UnidadMedidaCompra",
+        "FactorCantidadCompra",
+    }
+    if df.empty or not required.issubset(set(df.columns)):
+        return {}
+
+    indexes = {
+        "exact": {},
+        "ruc_product": {},
+        "global_exact": {},
+        "global_product": {},
+    }
+
+    for _, raw in df.iterrows():
+        factor = _safe_float_conversion(raw.get("FactorCantidadCompra", 0.0))
+        if factor <= 0.0:
+            continue
+
+        row = {
+            "RucProveedor": _norm_ruc_alias(raw.get("RucProveedor", "")),
+            "CodProductoMaestro": _norm_cod_alias(raw.get("CodProductoMaestro", "")),
+            "CodProductoCpe": _norm_cod_alias(raw.get("CodProductoCpe", "")),
+            "UnidadMedidaCpe": _norm_unit_alias(raw.get("UnidadMedidaCpe", "")),
+            "UnidadMedidaCompra": _norm_unit_alias(raw.get("UnidadMedidaCompra", "")),
+            "FactorCantidadCompra": factor,
+            "Muestras": _safe_float_conversion(raw.get("Muestras", 0.0)),
+            "MuestrasModa": _safe_float_conversion(raw.get("MuestrasModa", 0.0)),
+            "ConfianzaModa": _safe_float_conversion(raw.get("ConfianzaModa", 0.0)),
+        }
+
+        if not row["CodProductoMaestro"] or not row["CodProductoCpe"]:
+            continue
+
+        exact_key = (
+            row["RucProveedor"],
+            row["CodProductoMaestro"],
+            row["CodProductoCpe"],
+            row["UnidadMedidaCpe"],
+            row["UnidadMedidaCompra"],
+        )
+        ruc_product_key = (
+            row["RucProveedor"],
+            row["CodProductoMaestro"],
+            row["CodProductoCpe"],
+        )
+        global_exact_key = (
+            row["CodProductoMaestro"],
+            row["CodProductoCpe"],
+            row["UnidadMedidaCpe"],
+            row["UnidadMedidaCompra"],
+        )
+        global_product_key = (row["CodProductoMaestro"], row["CodProductoCpe"])
+
+        indexes["exact"][exact_key] = _prefer_conversion_row(indexes["exact"].get(exact_key), row)
+        indexes["ruc_product"][ruc_product_key] = _prefer_conversion_row(
+            indexes["ruc_product"].get(ruc_product_key), row
+        )
+        indexes["global_exact"][global_exact_key] = _prefer_conversion_row(
+            indexes["global_exact"].get(global_exact_key), row
+        )
+        indexes["global_product"][global_product_key] = _prefer_conversion_row(
+            indexes["global_product"].get(global_product_key), row
+        )
+
+    return indexes
 
 
 def _build_learned_alias_index(
@@ -229,7 +376,22 @@ def cargar_items_desde_csv(csv_bytes: bytes) -> List[dict]:
 
     df.columns = df.columns.astype(str).str.strip()
 
-    # Mantener compatibilidad con CSVs antiguos: ValorTotal es opcional.
+    alias_columnas = {
+        "cantidad": "Cantidad",
+        "cantidadcpe": "Cantidad",
+        "cantidad_cpe": "Cantidad",
+        "cantidad_factura": "Cantidad",
+        "valortotal": "ValorTotal",
+        "valor_total": "ValorTotal",
+    }
+    renombres = {}
+    existentes_lower = {str(c).lower().strip(): c for c in df.columns}
+    for alias, canonica in alias_columnas.items():
+        if canonica not in df.columns and alias in existentes_lower:
+            renombres[existentes_lower[alias]] = canonica
+    if renombres:
+        df = df.rename(columns=renombres)
+
     required_fields = [
         "RucProveedor",
         "CodProducto",
@@ -262,6 +424,7 @@ def cargar_items_desde_csv(csv_bytes: bytes) -> List[dict]:
     df["UnidadMedidaCompra"] = df["UnidadMedidaCompra"].fillna("").astype(str).str.strip()
     df["CostoCaja"] = pd.to_numeric(df["CostoCaja"], errors="coerce").fillna(0.0)
     df["ValorTotal"] = pd.to_numeric(df["ValorTotal"], errors="coerce").fillna(0.0)
+    df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0.0)
 
     output_fields = required_fields + optional_fields
 
@@ -298,6 +461,7 @@ def homologar_items(
             maestro_p,
             _load_positive_aliases(tenant_norm),
         )
+        quantity_conversion_lookup = _load_quantity_conversion_lookup(tenant_norm)
 
         for inicio in range(0, len(facturas), batch_size):
             lote = facturas.iloc[inicio:inicio + batch_size].copy()
@@ -312,6 +476,7 @@ def homologar_items(
                 umbral_match=umbral_match,
                 top_n_candidates=top_n_candidates,
                 learned_alias_idx=learned_alias_idx,
+                quantity_conversion_lookup=quantity_conversion_lookup,
             )
 
             resultado_lote = resultado_lote.fillna("")

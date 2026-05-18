@@ -42,6 +42,15 @@ EQUIVALENCIAS_FACTURAS = {
         "importe_total",
         "monto_total",
     ],
+    "Cantidad": [
+        "cantidad",
+        "cantidadcpe",
+        "cantidad_cpe",
+        "cantidad_factura",
+        "cantidadfactura",
+        "qty",
+        "quantity",
+    ],
 }
 
 
@@ -166,6 +175,9 @@ def preparar_facturas(facturas: pd.DataFrame) -> pd.DataFrame:
     if "ValorTotal" not in df.columns:
         df["ValorTotal"] = 0.0
 
+    if "Cantidad" not in df.columns:
+        df["Cantidad"] = 0.0
+
     if "PesoUnitario" not in df.columns:
         df["PesoUnitario"] = 0.0
 
@@ -180,6 +192,7 @@ def preparar_facturas(facturas: pd.DataFrame) -> pd.DataFrame:
     df["Unidad_norm"] = df["UnidadMedidaCompra"].fillna("").astype(str).map(normalizar_unidad)
     df["CostoCaja"] = pd.to_numeric(df["CostoCaja"], errors="coerce").fillna(0.0)
     df["ValorTotal"] = pd.to_numeric(df["ValorTotal"], errors="coerce").fillna(0.0)
+    df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0.0)
     df["Costo_log"] = df["CostoCaja"].map(log_seguro)
     df["PesoUnitario"] = pd.to_numeric(df["PesoUnitario"], errors="coerce").fillna(0.0)
 

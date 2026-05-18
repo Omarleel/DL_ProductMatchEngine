@@ -3,12 +3,16 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.config import get_settings
-from app.services.dataset_service import cargar_autohomologaciones
+from app.services.dataset_service import (
+    cargar_autohomologaciones,
+    generar_diccionario_conversion_unidades_raw,
+)
 from app.services.maestro_service import cargar_maestro, get_facturas_path, get_maestro_path
 from app.services.tenant_service import (
     DEFAULT_TENANT,
     get_tenant_artifacts_dir,
     get_tenant_processed_data_dir,
+    get_tenant_raw_data_dir,
     normalizar_tenant,
 )
 from ml_pipeline.homologador.trainer import entrenar_y_promover_homologador
@@ -77,6 +81,21 @@ def entrenar_modelo_homologador(
                 len(autohomologaciones.columns),
             )
 
+            logger.info("Generando diccionario de conversión de cantidades tenant=%s", tenant_norm)
+            conversion_raw, conversion_dict = generar_diccionario_conversion_unidades_raw(tenant_norm)
+            raw_dir = get_tenant_raw_data_dir(tenant_norm)
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            conversion_raw_path = raw_dir / "conversion_unidades_raw.csv"
+            conversion_dict_path = raw_dir / "diccionario_conversion_unidades.csv"
+            conversion_raw.to_csv(conversion_raw_path, index=False, encoding="utf-8-sig")
+            conversion_dict.to_csv(conversion_dict_path, index=False, encoding="utf-8-sig")
+            logger.info(
+                "Diccionario de conversión guardado: raw_rows=%s dict_rows=%s path=%s",
+                len(conversion_raw),
+                len(conversion_dict),
+                conversion_dict_path,
+            )
+
         result = entrenar_y_promover_homologador(
             maestro=maestro,
             historial=historial,
@@ -118,6 +137,7 @@ def _limpiar_cache_inferencia_homologador() -> None:
         inferencia._load_homologador_model.cache_clear()
         inferencia._load_homologador_context.cache_clear()
         inferencia._load_positive_aliases.cache_clear()
+        inferencia._load_quantity_conversion_lookup.cache_clear()
     except Exception:
         # El entrenamiento ya terminó; no conviene fallar solo por limpieza de cache.
         pass

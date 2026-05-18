@@ -55,7 +55,10 @@ def limpiar_cache_maestro(tenant: Optional[str] = None) -> None:
 
     cacheados_derivados = {
         "app.services.inferencia_clasificador_service": ["_get_resolvers"],
-        "app.services.inferencia_homologacion_service": ["_load_homologador_context"],
+        "app.services.inferencia_homologacion_service": [
+            "_load_homologador_context",
+            "_load_quantity_conversion_lookup",
+        ],
     }
     for module_name, function_names in cacheados_derivados.items():
         module = sys.modules.get(module_name)
