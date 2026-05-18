@@ -15,6 +15,7 @@ from ml_pipeline.utils.matching import (
     recuperar_candidatos,
 )
 from ml_pipeline.utils.preparacion import preparar_facturas, preparar_maestro
+from ml_pipeline.utils.limpieza import normalizar_codigo
 from .feature_engineering import add_aux_pair_features
 
 
@@ -49,6 +50,67 @@ def _round_quantity(value: float, decimals: int = 6):
         return int(nearest)
 
     return round(value, decimals)
+
+
+def _norm_ruc_alias(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
+def _norm_cod_alias(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.endswith(".0") and text.replace(".", "", 1).isdigit():
+        text = text[:-2]
+    return normalizar_codigo(text)
+
+
+def _buscar_match_aprendido(
+    fila_factura: pd.Series,
+    maestro: pd.DataFrame,
+    learned_alias_idx: Optional[dict[tuple[str, str], int]] = None,
+) -> Optional[pd.Series]:
+    """
+    Busca una equivalencia supervisada aprendida durante entrenamiento.
+
+    El modelo neural ayuda a generalizar, pero si en el dataset de entrenamiento ya existe
+    una relación exacta (RUC, código CPE/factura) -> código maestro, esa señal debe ganar
+    antes del ranking aproximado.
+    """
+    if not learned_alias_idx:
+        return None
+
+    key = (
+        _norm_ruc_alias(fila_factura.get("RucProveedor", "")),
+        _norm_cod_alias(fila_factura.get("CodProducto", "")),
+    )
+    row_idx = learned_alias_idx.get(key)
+    if row_idx is None:
+        # Permite aliases globales solo cuando el entrenamiento los dejó sin RUC.
+        row_idx = learned_alias_idx.get(("", key[1]))
+
+    if row_idx is None:
+        return None
+
+    try:
+        return maestro.loc[row_idx]
+    except Exception:
+        return None
 
 
 def _build_factura_output_fields(f: pd.Series, candidato: Optional[pd.Series] = None) -> dict:
@@ -278,6 +340,15 @@ def _compute_final_scores(cand: pd.DataFrame) -> pd.DataFrame:
     model_max = float(model_score.max()) if len(model_score) > 0 else 0.0
     model_collapse = (model_max < 0.15) or (model_spread < 0.03)
 
+    # El score del modelo puede estar mal calibrado para candidatos sin evidencia textual.
+    # Por eso no debe dominar el ranking si el candidato casi no comparte familia/producto
+    # con la factura. En el caso observado, "ENVASE PAMOLSA..." ganaba solo por
+    # ScoreModelo alto pese a LexicalSupport ~0.006.
+    text_gate = np.clip((lexical - 0.03) / 0.30, 0.0, 1.0)
+    support_gate = np.clip((support - 0.12) / 0.40, 0.0, 1.0)
+    model_evidence_gate = text_gate * support_gate
+    model_score_guarded = model_score * model_evidence_gate
+
     if model_collapse:
         cand["ScoreFinal"] = (
             0.52 * support
@@ -288,25 +359,33 @@ def _compute_final_scores(cand: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         raw_score = (
-            0.45 * model_score
-            + 0.25 * support
-            + 0.12 * lexical
-            + 0.10 * struct
-            + 0.08 * emb_rank
+            0.20 * model_score_guarded
+            + 0.35 * support
+            + 0.16 * lexical
+            + 0.12 * struct
+            + 0.17 * emb_rank
             + close_match_bonus
         )
 
         gate = np.clip(
-            0.35 + 0.65 * (0.55 * lexical + 0.45 * struct),
-            0.35,
+            0.15 + 0.85 * (0.55 * lexical + 0.45 * struct),
+            0.15,
             1.00,
         )
 
         cand["ScoreFinal"] = raw_score * gate
 
+    # Veto suave para falsos positivos semánticamente ajenos. No elimina el candidato
+    # del top_k, solo evita que gane por una probabilidad neural espuria.
+    low_text_support = (lexical < 0.08) & (support < 0.28)
+    low_text_cap = 0.04 + 0.28 * support + 0.06 * emb_rank + 0.04 * struct
+    cand.loc[low_text_support, "ScoreFinal"] = np.minimum(
+        cand.loc[low_text_support, "ScoreFinal"],
+        low_text_cap[low_text_support],
+    )
+
     cand["Score"] = cand["ScoreFinal"]
     return cand
-
 
 def inferir_codproducto_homologador(
     productos_facturas: pd.DataFrame,
@@ -318,6 +397,7 @@ def inferir_codproducto_homologador(
     umbral_match: Optional[float] = None,
     top_n_candidates: int = 80,
     maestro: Optional[pd.DataFrame] = None,
+    learned_alias_idx: Optional[dict[tuple[str, str], int]] = None,
 ) -> pd.DataFrame:
     """Infiere el CodProducto usando un maestro preparado o un maestro crudo.
     """
@@ -360,7 +440,12 @@ def inferir_codproducto_homologador(
     for _, f in fact_p.iterrows():
         ruc_original = str(f.get("RucProveedor", "")).strip()
         
-        exacto = buscar_match_exacto(f, maestro_p, idx)
+        exacto = _buscar_match_aprendido(f, maestro_p, learned_alias_idx)
+        exacto_origen = "APRENDIDO" if exacto is not None else "EXACTO"
+
+        if exacto is None:
+            exacto = buscar_match_exacto(f, maestro_p, idx)
+            exacto_origen = "EXACTO" if exacto is not None else exacto_origen
         
         if exacto is None and ruc_original in RUC_EQUIVALENTES:
             f_alt = f.copy()
@@ -369,11 +454,13 @@ def inferir_codproducto_homologador(
             f_alt["CodProducto"] = str(f_alt.get("CodProducto", "")).lstrip('0')
             
             exacto = buscar_match_exacto(f_alt, maestro_p, idx)
+            if exacto is not None:
+                exacto_origen = "EXACTO_RUC_EQUIVALENTE"
 
         if exacto is not None:
             row = exacto.drop(labels=["_row_idx", "_ruc_norm"], errors="ignore").to_dict()
             row.update({
-                "OrigenCandidato": "EXACTO",
+                "OrigenCandidato": exacto_origen,
                 "EmbeddingScore": 1.0,
                 "LexicalSupport": 1.0,
                 "StructureSupport": 1.0,
@@ -382,7 +469,7 @@ def inferir_codproducto_homologador(
                 "ScoreModelo": 1.0,
                 "ScoreFinal": 1.0,
                 "Score": 1.0,
-                "TipoResultado": "EXACTO",
+                "TipoResultado": exacto_origen,
                 **_build_factura_output_fields(f, exacto),
                 "Rank": 1,
             })

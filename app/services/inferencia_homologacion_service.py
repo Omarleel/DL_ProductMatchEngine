@@ -15,6 +15,7 @@ from app.schemas.homologador import HomologacionItemRequest
 from app.services.tenant_service import (
     DEFAULT_TENANT,
     get_tenant_artifacts_dir,
+    get_tenant_processed_data_dir,
     get_tenant_results_data_dir,
     normalizar_tenant,
 )
@@ -23,6 +24,7 @@ from ml_pipeline.homologador import (
     inferir_codproducto_homologador,
 )
 from ml_pipeline.utils.config import require_file
+from ml_pipeline.utils.limpieza import normalizar_codigo
 from ml_pipeline.utils.matching import construir_indice_codigos
 from ml_pipeline.utils.preparacion import preparar_maestro
 
@@ -71,6 +73,131 @@ def _load_homologador_context(tenant: str = DEFAULT_TENANT) -> tuple[pd.DataFram
     idx = construir_indice_codigos(maestro_p)
     maestro_emb = modelo.encode_prepared_items(maestro_p)
     return maestro_p, idx, maestro_emb
+
+
+def _norm_ruc_alias(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
+
+
+def _norm_cod_alias(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).strip()
+    if text.endswith(".0") and text.replace(".", "", 1).isdigit():
+        text = text[:-2]
+    return normalizar_codigo(text)
+
+
+@lru_cache(maxsize=64)
+def _load_positive_aliases(tenant: str = DEFAULT_TENANT) -> tuple[tuple[str, str, str], ...]:
+    """
+    Carga equivalencias positivas generadas durante el entrenamiento.
+
+    Esto convierte un par ya visto (RUC, CodProducto de CPE/factura) -> CodProducto maestro
+    en una búsqueda exacta supervisada. Si el mismo par apunta a más de un maestro, se descarta
+    para no introducir ambigüedad.
+    """
+    tenant_norm = normalizar_tenant(tenant)
+    processed_dir = get_tenant_processed_data_dir(tenant_norm)
+    candidate_paths = [
+        processed_dir / "pares_entrenamiento_homologador.csv",
+        processed_dir / "pares_entrenamiento_homologador_final.csv",
+    ]
+
+    path = next((p for p in candidate_paths if p.exists()), None)
+    if path is None:
+        return tuple()
+
+    try:
+        pares = pd.read_csv(
+            path,
+            encoding="utf-8-sig",
+            sep=None,
+            engine="python",
+            dtype={
+                "RucProveedor": "string",
+                "fact_cod": "string",
+                "master_cod": "string",
+            },
+        )
+    except Exception:
+        return tuple()
+
+    required = {"RucProveedor", "fact_cod", "master_cod", "label"}
+    if not required.issubset(set(pares.columns)):
+        return tuple()
+
+    label_num = pd.to_numeric(pares["label"], errors="coerce").fillna(0).astype(int)
+    pos = pares.loc[label_num.eq(1), ["RucProveedor", "fact_cod", "master_cod"]].copy()
+    if pos.empty:
+        return tuple()
+
+    pos["_ruc"] = pos["RucProveedor"].map(_norm_ruc_alias)
+    pos["_fact"] = pos["fact_cod"].map(_norm_cod_alias)
+    pos["_master"] = pos["master_cod"].map(_norm_cod_alias)
+    pos = pos[(pos["_fact"] != "") & (pos["_master"] != "")].drop_duplicates(
+        subset=["_ruc", "_fact", "_master"]
+    )
+
+    if pos.empty:
+        return tuple()
+
+    counts = pos.groupby(["_ruc", "_fact"], dropna=False)["_master"].nunique()
+    valid_keys = set(counts[counts.eq(1)].index)
+    pos = pos[pos.apply(lambda r: (r["_ruc"], r["_fact"]) in valid_keys, axis=1)]
+
+    return tuple(pos[["_ruc", "_fact", "_master"]].itertuples(index=False, name=None))
+
+
+def _build_learned_alias_index(
+    maestro_p: pd.DataFrame,
+    aliases: tuple[tuple[str, str, str], ...],
+) -> dict[tuple[str, str], int]:
+    if not aliases:
+        return {}
+
+    maestro = maestro_p.copy()
+    maestro["_ruc_alias"] = maestro["RucProveedor"].map(_norm_ruc_alias)
+    maestro["_cod_alias"] = maestro["CodProducto"].map(_norm_cod_alias)
+
+    by_ruc_cod = {
+        (str(row["_ruc_alias"]), str(row["_cod_alias"])): idx
+        for idx, row in maestro.iterrows()
+        if str(row["_cod_alias"])
+    }
+
+    code_counts = maestro.groupby("_cod_alias").size()
+    unique_codes = set(code_counts[code_counts.eq(1)].index.astype(str))
+    by_unique_cod = {
+        str(row["_cod_alias"]): idx
+        for idx, row in maestro.iterrows()
+        if str(row["_cod_alias"]) in unique_codes
+    }
+
+    out: dict[tuple[str, str], int] = {}
+    for ruc, fact_cod, master_cod in aliases:
+        idx = by_ruc_cod.get((ruc, master_cod))
+        if idx is None:
+            idx = by_unique_cod.get(master_cod)
+        if idx is not None:
+            out[(ruc, fact_cod)] = idx
+
+    return out
 
 
 def _filtrar_columnas_resultado(resultado: pd.DataFrame) -> pd.DataFrame:
@@ -167,6 +294,10 @@ def homologar_items(
     try:
         maestro_p, idx, maestro_emb = _load_homologador_context(tenant_norm)
         modelo_homologador = _load_homologador_model(tenant_norm)
+        learned_alias_idx = _build_learned_alias_index(
+            maestro_p,
+            _load_positive_aliases(tenant_norm),
+        )
 
         for inicio in range(0, len(facturas), batch_size):
             lote = facturas.iloc[inicio:inicio + batch_size].copy()
@@ -180,6 +311,7 @@ def homologar_items(
                 top_k=top_k,
                 umbral_match=umbral_match,
                 top_n_candidates=top_n_candidates,
+                learned_alias_idx=learned_alias_idx,
             )
 
             resultado_lote = resultado_lote.fillna("")

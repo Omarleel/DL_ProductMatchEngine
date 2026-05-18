@@ -117,6 +117,7 @@ def _limpiar_cache_inferencia_homologador() -> None:
 
         inferencia._load_homologador_model.cache_clear()
         inferencia._load_homologador_context.cache_clear()
+        inferencia._load_positive_aliases.cache_clear()
     except Exception:
         # El entrenamiento ya terminó; no conviene fallar solo por limpieza de cache.
         pass
