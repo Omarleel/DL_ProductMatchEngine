@@ -38,6 +38,8 @@ def entrenar_y_promover_homologador(
     processed_data_dir: Path,
     model_name: str,
     n_neg_por_pos: int = 4,
+    auto_match: bool = False,
+    autohomologaciones: pd.DataFrame | None = None,
     epochs_warmup: int = 10,
     epochs_final: int = 16,
     batch_size: int = 256,
@@ -60,6 +62,8 @@ def entrenar_y_promover_homologador(
             maestro=maestro,
             productos_facturas=historial,
             n_neg_por_pos=n_neg_por_pos,
+            auto_match=auto_match,
+            autohomologaciones=autohomologaciones,
         )
 
         processed_data_dir.mkdir(parents=True, exist_ok=True)
@@ -154,6 +158,8 @@ def entrenar_y_promover_homologador(
             "run_id": run_id,
             "model_name": model_name,
             "comparison_target": "validacion_actual",
+            "auto_match": bool(auto_match),
+            "autohomologacion_rows": int(len(autohomologaciones)) if autohomologaciones is not None else 0,
             "base_rows": int(len(pares_base)),
             "train_base_rows": int(len(train_base)),
             "valid_base_rows": int(len(valid_base)),
@@ -196,6 +202,8 @@ def entrenar_y_promover_homologador(
             "candidate_dir": promotion["candidate_dir"],
             "champion_dir": promotion["champion_dir"],
             "archived_previous_dir": promotion["archived_previous_dir"],
+            "auto_match": bool(auto_match),
+            "autohomologacion_rows": int(len(autohomologaciones)) if autohomologaciones is not None else 0,
             "pairs_base_path": str(pares_base_path),
             "pairs_hard_path": str(pares_hard_path) if pares_hard_path else None,
             "pairs_final_path": str(train_final_path),

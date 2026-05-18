@@ -17,6 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tenant", default=DEFAULT_TENANT, help="Tenant/sucursal a entrenar.")
     parser.add_argument("--n-neg-por-pos", type=int, default=4)
+    parser.add_argument(
+        "--auto_match",
+        action="store_true",
+        help="Usa compras/CPE históricos para construir positivos cuando el código CPE no está en el maestro.",
+    )
     parser.add_argument("--epochs-warmup", type=int, default=10)
     parser.add_argument("--epochs-final", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -39,6 +44,7 @@ def main() -> None:
     result = entrenar_modelo_homologador(
         tenant=tenant,
         n_neg_por_pos=args.n_neg_por_pos,
+        auto_match=args.auto_match,
         epochs_warmup=args.epochs_warmup,
         epochs_final=args.epochs_final,
         batch_size=args.batch_size,

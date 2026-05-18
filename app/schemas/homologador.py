@@ -46,6 +46,13 @@ class EntrenamientoHomologadorRequest(BaseModel):
         validation_alias=AliasChoices("tenant", "sede"),
     )
     n_neg_por_pos: int = Field(default=4, ge=1, le=10)
+    auto_match: bool = Field(
+        default=False,
+        description=(
+            "Si es True, construye pares positivos usando la consulta de compras/CPE "
+            "configurada para el tenant, además de las coincidencias exactas por código."
+        ),
+    )
     epochs_warmup: int = Field(default=10, ge=1, le=50)
     epochs_final: int = Field(default=16, ge=1, le=100)
     batch_size: int = Field(default=256, ge=16, le=1024)

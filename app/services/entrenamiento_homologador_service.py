@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.core.config import get_settings
+from app.services.dataset_service import cargar_autohomologaciones
 from app.services.maestro_service import cargar_maestro, get_facturas_path, get_maestro_path
 from app.services.tenant_service import (
     DEFAULT_TENANT,
@@ -20,6 +21,7 @@ logger = TrainingLogger("homologador")
 
 def entrenar_modelo_homologador(
     n_neg_por_pos: int = 4,
+    auto_match: bool = False,
     epochs_warmup: int = 10,
     epochs_final: int = 16,
     batch_size: int = 256,
@@ -34,7 +36,7 @@ def entrenar_modelo_homologador(
     tenant_norm = normalizar_tenant(tenant)
     logger.info(
         "Inicio entrenamiento tenant=%s run_id=%s epochs_warmup=%s epochs_final=%s batch_size=%s "
-        "top_n_candidates=%s k_hard_per_positive=%s force_replace=%s",
+        "top_n_candidates=%s k_hard_per_positive=%s auto_match=%s force_replace=%s",
         tenant_norm,
         run_id,
         epochs_warmup,
@@ -42,6 +44,7 @@ def entrenar_modelo_homologador(
         batch_size,
         top_n_candidates,
         k_hard_per_positive,
+        auto_match,
         force_replace,
     )
     try:
@@ -64,6 +67,16 @@ def entrenar_modelo_homologador(
         )
         logger.info("Historial cargado: rows=%s cols=%s", len(historial), len(historial.columns))
 
+        autohomologaciones = None
+        if auto_match:
+            logger.info("Leyendo autohomologaciones tenant=%s desde compras históricas", tenant_norm)
+            autohomologaciones = cargar_autohomologaciones(tenant_norm)
+            logger.info(
+                "Autohomologaciones cargadas: rows=%s cols=%s",
+                len(autohomologaciones),
+                len(autohomologaciones.columns),
+            )
+
         result = entrenar_y_promover_homologador(
             maestro=maestro,
             historial=historial,
@@ -71,6 +84,8 @@ def entrenar_modelo_homologador(
             processed_data_dir=get_tenant_processed_data_dir(tenant_norm),
             model_name=settings.homologador_model_name,
             n_neg_por_pos=n_neg_por_pos,
+            auto_match=auto_match,
+            autohomologaciones=autohomologaciones,
             epochs_warmup=epochs_warmup,
             epochs_final=epochs_final,
             batch_size=batch_size,

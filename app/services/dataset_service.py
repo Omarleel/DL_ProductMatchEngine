@@ -106,6 +106,64 @@ SELECT EmisorRuc AS RucProveedor, CodProducto, Producto, UnidadMedidaCompra, Cos
 """
 
 
+SQL_AUTOHOMOLOGACION_REX = """
+WITH CpeItemsNumerados AS (
+    SELECT
+        ci.CarSunat,
+        COALESCE(ci.CodProducto, ci.CodProdGS1) AS CodProducto,
+        ci.Descripcion,
+        ci.Cantidad,
+        ci.CodUnidadMedida,
+        ci.Total,
+        ROW_NUMBER() OVER (
+            PARTITION BY ci.CarSunat
+            ORDER BY Id
+        ) AS NumItem
+    FROM CpeItems ci (NOLOCK) 
+    INNER JOIN Cpe c (NOLOCK) ON ci.CarSunat = c.CarSunat AND c.TipoDoc = '01'
+),
+MatchesPaginados AS (
+    SELECT
+        RTRIM(p.cproveedor_ruc) AS RucProveedor,
+        RTRIM(a.carticulos_id) AS CodProductoMaestro,
+        a.carticulos_nombre AS ProductoMaestro,
+        cin.CodProducto AS CodProductoCpe,
+        cin.Descripcion AS ProductoCpe,
+        ROW_NUMBER() OVER (
+            PARTITION BY RTRIM(p.cproveedor_ruc), RTRIM(a.carticulos_id), cin.CodProducto
+            ORDER BY m.dmovimiento_fechahora DESC, m.cmovimiento_id DESC
+        ) AS Fila
+    FROM [_movimiento] m (NOLOCK)
+    INNER JOIN [_movimiento_detalle] md (NOLOCK) ON md.cmovimiento_id = m.cmovimiento_id
+    INNER JOIN [_proveedor] p ON p.cproveedor_id = m.cproveedor_id
+    INNER JOIN [_articulos] a ON a.carticulos_id = md.carticulos_id
+    INNER JOIN CpeItemsNumerados cin
+        ON CONCAT(cin.CarSunat, RIGHT('000' + CAST(cin.NumItem AS VARCHAR(3)), 3)) = CONCAT(
+            LTRIM(RTRIM(p.cproveedor_ruc)),
+            '01',
+            SUBSTRING(LTRIM(RTRIM(m.cmovimiento_nro_sunat)), 1, 4),
+            RIGHT('0000000000' + SUBSTRING(LTRIM(RTRIM(m.cmovimiento_nro_sunat)), 5, 20), 10),
+            RIGHT('000' + LTRIM(RTRIM(md.cmovimiento_detalle_item)), 3)
+        )
+    WHERE m.dmovimiento_fechahora >= DATEADD(YEAR, -2, CAST(GETDATE() AS DATE))
+      AND m.calmacenes_origen_id = '001'
+      AND m.cmovimiento_estado = 'Ad'
+      AND m.cmovimiento_tipo = 'I'
+      AND LTRIM(RTRIM(m.cmovimiento_nro_sunat)) LIKE '%[0-9]'
+      AND ABS(cin.Total - md.nmovimiento_detalle_valor_venta_soles) < 1
+)
+SELECT
+    RucProveedor,
+    CodProductoMaestro,
+    ProductoMaestro,
+    CodProductoCpe,
+    ProductoCpe
+FROM MatchesPaginados
+WHERE Fila = 1
+ORDER BY CodProductoMaestro ASC;
+"""
+
+
 SQL_MAESTRO_PORTALES = """
 WITH UltimoCosto AS (
     SELECT imd.ProductoId, im.FechaEmision, imd.PrecioUnitario AS CostoUnitario,
@@ -169,17 +227,86 @@ FROM UltimoCosto
 WHERE rn = 1
 ORDER BY RucProveedor ASC;
 """
-
+SQL_AUTOHOMOLOGACION_PORTALES = """
+WITH CpeItemsNumerados AS (
+    SELECT
+        ci.CarSunat,
+        COALESCE(ci.CodProducto, ci.CodProdGS1) AS CodProducto,
+        ci.Descripcion,
+        ci.Cantidad,
+        ci.CodUnidadMedida,
+        ci.Total,
+        ROW_NUMBER() OVER (
+            PARTITION BY ci.CarSunat
+            ORDER BY Id
+        ) AS NumItem
+    FROM CpeItems ci (NOLOCK)
+    INNER JOIN Cpe c (NOLOCK) ON ci.CarSunat = c.CarSunat AND c.TipoDoc = '01'
+),
+DetallesErpNumerados AS (
+    SELECT 
+        dd.Id,
+        dd.CabeceraDocumentoId,
+        dd.ProductoId,
+        dd.PrecioTotal,
+        ROW_NUMBER() OVER (
+            PARTITION BY dd.CabeceraDocumentoId 
+            ORDER BY dd.Id
+        ) AS NumItemErp
+    FROM DetalleDocumento dd (NOLOCK)
+    WHERE dd.EstadoRegistro = 1
+),
+MatchesPaginados AS (
+    SELECT 
+        RTRIM(p2.NroDocumento) AS RucProveedor,
+        pr.Id AS CodProductoMaestro, 
+        RTRIM(pr.DescripcionLarga) AS ProductoMaestro,
+        cin.CodProducto AS CodProductoCpe,
+        cin.Descripcion AS ProductoCpe,
+        ROW_NUMBER() OVER (
+            PARTITION BY RTRIM(p2.NroDocumento), pr.Id, cin.CodProducto
+            ORDER BY cd.FechaEmision DESC, cd.Id DESC
+        ) AS Fila
+    FROM CabeceraDocumento cd (NOLOCK)
+    INNER JOIN DetallesErpNumerados dd ON dd.CabeceraDocumentoId = cd.Id 
+    INNER JOIN Producto pr (NOLOCK) ON pr.Id = dd.ProductoId 
+    INNER JOIN Proveedor p (NOLOCK) ON p.Id = cd.ProveedorId 
+    INNER JOIN Persona p2 (NOLOCK) ON p2.Id = p.PersonaId
+    INNER JOIN CpeItemsNumerados cin
+        ON CONCAT(cin.CarSunat, RIGHT('000' + CAST(cin.NumItem AS VARCHAR(3)), 3)) = CONCAT(
+            LTRIM(RTRIM(p2.NroDocumento)),                     -- RUC (11 chars)
+            '01',                                              -- Tipo Doc ('01' para Facturas)
+            SUBSTRING(LTRIM(RTRIM(cd.Serie)), 1, 4),           -- Serie (4 chars)
+            RIGHT('0000000000' + LTRIM(RTRIM(cd.Correlativo)), 10), -- Correlativo (10 chars)
+            RIGHT('000' + CAST(dd.NumItemErp AS VARCHAR(3)), 3)     -- Ítem calculado (3 chars)
+        )
+    WHERE cd.TipoDocumentoRelacionadoId IN (1, 2, 5, 7) 
+      AND cd.EstadoRegistro = 1 
+      AND cd.FechaEmision >= DATEADD(YEAR, -2, CAST(GETDATE() AS DATE))
+      AND ABS(cin.Total - dd.PrecioTotal) < 1 
+)
+SELECT 
+    RucProveedor,
+    CodProductoMaestro,
+    ProductoMaestro,
+    CodProductoCpe,
+    ProductoCpe
+FROM MatchesPaginados
+WHERE Fila = 1
+ORDER BY CodProductoMaestro ASC;
+"""
 
 QUERIES_MAP = {
     "PORTALES": {
         "maestro": SQL_MAESTRO_PORTALES,
-        "facturas": SQL_FACTURAS_NUEVAS_PORTALES
+        "facturas": SQL_FACTURAS_NUEVAS_PORTALES,
+        "auto_match": SQL_AUTOHOMOLOGACION_PORTALES,
     },
     "REX": {
         "maestro": SQL_MAESTRO_REX,
-        "facturas": SQL_FACTURAS_NUEVAS_REX
-    }
+        "facturas": SQL_FACTURAS_NUEVAS_REX,
+        "auto_match": SQL_AUTOHOMOLOGACION_REX,
+    },
 }
 
 
@@ -188,6 +315,41 @@ def _get_queries_for_sede(sede: str) -> dict:
     if "PORTALES" in sede_upper:
         return QUERIES_MAP["PORTALES"]
     return QUERIES_MAP["REX"]
+
+
+def _get_query_for_sede(sede: str, query_name: str) -> str:
+    """
+    Devuelve la consulta para una sede/tenant.
+
+    Para hacer la autohomologación extensible por base de datos, se puede configurar
+    un archivo SQL por ambiente con esta convención:
+
+        SQL_<SEDE>_<QUERY_NAME>_QUERY_FILE
+
+    Ejemplo:
+        SQL_MI_TENANT_AUTOHOMOLOGACION_QUERY_FILE=/opt/sql/autohomologacion_mi_tenant.sql
+
+    Si no existe archivo configurado, se usa el mapa interno QUERIES_MAP.
+    """
+    sede_key = sede.upper().strip()
+    query_key = query_name.lower().strip()
+    env_key = f"SQL_{sede_key}_{query_key.upper()}_QUERY_FILE"
+    query_file = os.getenv(env_key)
+
+    if query_file:
+        path = Path(query_file)
+        if not path.exists():
+            raise FileNotFoundError(f"No existe el archivo SQL configurado en {env_key}: {path}")
+        return path.read_text(encoding="utf-8")
+
+    queries = _get_queries_for_sede(sede)
+    sql = queries.get(query_key)
+    if not sql:
+        raise ValueError(
+            f"No hay consulta '{query_key}' configurada para la sede '{sede}'. "
+            f"Configura {env_key} o agrega la consulta a QUERIES_MAP."
+        )
+    return sql
 
 def _build_connection_string(sede: str) -> str:
     sede_key = sede.upper().strip()
@@ -215,12 +377,10 @@ def _normalize_text_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def generar_datasets_raw(tenant: str, overwrite: bool = True) -> dict:
     tenant_norm = normalizar_tenant(tenant)
-    queries = _get_queries_for_sede(tenant)
-
     print(f"Generando datasets para tenant={tenant_norm}...")
 
-    maestro_df = _normalize_text_columns(_read_sql(queries["maestro"], tenant))
-    facturas_df = _normalize_text_columns(_read_sql(queries["facturas"], tenant))
+    maestro_df = _normalize_text_columns(_read_sql(_get_query_for_sede(tenant, "maestro"), tenant))
+    facturas_df = _normalize_text_columns(_read_sql(_get_query_for_sede(tenant, "facturas"), tenant))
 
     raw_dir = get_tenant_raw_data_dir(tenant_norm)
     maestro_path = raw_dir / "maestro.csv"
@@ -253,3 +413,36 @@ def generar_datasets_raw(tenant: str, overwrite: bool = True) -> dict:
             "ruta": str(facturas_path),
         },
     }
+
+
+
+def cargar_autohomologaciones(tenant: str) -> pd.DataFrame:
+    """
+    Lee las homologaciones inferidas desde las compras históricas del tenant.
+
+    La consulta debe retornar, como mínimo:
+      - CodProductoMaestro
+      - CodProductoCpe
+
+    Opcionalmente puede retornar:
+      - RucProveedor
+      - ProductoMaestro
+      - ProductoCpe
+
+    Esta salida se usa únicamente como verdad histórica para construir pares
+    positivos durante el entrenamiento, no durante la inferencia.
+    """
+    tenant_norm = normalizar_tenant(tenant)
+    sql = _get_query_for_sede(tenant, "auto_match")
+    df = _normalize_text_columns(_read_sql(sql, tenant))
+
+    required = {"CodProductoMaestro", "CodProductoCpe"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(
+            "La consulta de autohomologación debe retornar las columnas: "
+            f"{', '.join(sorted(required))}. Faltan: {', '.join(missing)}"
+        )
+
+    print(f"Autohomologaciones cargadas para tenant={tenant_norm}: filas={len(df)}")
+    return df

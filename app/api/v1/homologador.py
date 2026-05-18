@@ -125,6 +125,7 @@ async def iniciar_entrenamiento(
             entrenar_modelo_homologador,
             tenant=tenant,
             n_neg_por_pos=payload.n_neg_por_pos,
+            auto_match=payload.auto_match,
             epochs_warmup=payload.epochs_warmup,
             epochs_final=payload.epochs_final,
             batch_size=payload.batch_size,
@@ -141,6 +142,7 @@ async def iniciar_entrenamiento(
             "tenant": tenant,
             "run_id": run_id,
             "force_replace": payload.force_replace,
+            "auto_match": payload.auto_match,
             "mensaje": (
                 "El reentrenamiento del homologador comenzó en segundo plano para el tenant indicado. "
                 "El modelo campeón solo será reemplazado si el candidato mejora en la validación actual, "
